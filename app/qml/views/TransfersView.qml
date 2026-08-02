@@ -1,0 +1,182 @@
+// Delegates call helpers defined on this file's root.
+pragma ComponentBehavior: Bound
+
+import QtQuick
+import MazeConnect.App
+
+Item {
+    id: root
+
+    function humanSize(bytes) {
+        if (bytes < 1024)
+            return qsTr("%1 B").arg(bytes)
+        if (bytes < 1024 * 1024)
+            return qsTr("%1 KB").arg((bytes / 1024).toFixed(1))
+        if (bytes < 1024 * 1024 * 1024)
+            return qsTr("%1 MB").arg((bytes / (1024 * 1024)).toFixed(1))
+        return qsTr("%1 GB").arg((bytes / (1024 * 1024 * 1024)).toFixed(2))
+    }
+
+    Row {
+        id: header
+        width: parent.width
+        spacing: 12
+
+        SectionLabel {
+            text: qsTr("Transfers")
+            anchors.verticalCenter: parent.verticalCenter
+        }
+
+        Item { width: parent.width - 260; height: 1 }
+
+        MazeButton {
+            text: qsTr("Clear finished")
+            enabled: Backend.transfers.count > Backend.transfers.activeCount
+            onClicked: Backend.transfers.clearFinished()
+        }
+    }
+
+    ListView {
+        anchors.top: header.bottom
+        anchors.topMargin: 14
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        clip: true
+        spacing: 8
+        model: Backend.transfers
+        boundsBehavior: Flickable.StopAtBounds
+
+        Column {
+            anchors.centerIn: parent
+            spacing: 10
+            width: 400
+            visible: Backend.transfers.count === 0
+
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: qsTr("No transfers")
+                color: Theme.text
+                font.family: Theme.fontSans
+                font.pixelSize: 18
+            }
+            Text {
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.WordWrap
+                text: qsTr("Files you send or accept appear here while they move, and stay until you clear them.")
+                color: Theme.dim
+                font.family: Theme.fontSans
+                font.pixelSize: 13
+                lineHeight: 1.45
+            }
+            Text {
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                text: qsTr("Received files go to %1").arg(Backend.inboxPath)
+                color: Theme.faint
+                font.family: Theme.fontMono
+                font.pixelSize: 10
+                elide: Text.ElideMiddle
+            }
+        }
+
+        delegate: Rectangle {
+            id: item
+
+            required property int transferId
+            required property string deviceName
+            required property string filename
+            required property real received
+            required property real total
+            required property real progress
+            required property int transferState
+            required property string detail
+            required property bool incoming
+
+            width: ListView.view.width
+            height: 74
+            radius: Theme.radiusPill
+            color: Theme.pill
+
+            readonly property color stateColor:
+                item.transferState === 1 ? Theme.ok
+              : item.transferState === 2 ? Theme.bad
+              : Theme.text
+
+            Row {
+                anchors.left: parent.left
+                anchors.leftMargin: 16
+                anchors.top: parent.top
+                anchors.topMargin: 14
+                spacing: 10
+
+                Text {
+                    text: item.incoming ? "↧" : "↥"
+                    color: item.stateColor
+                    font.family: Theme.fontMono
+                    font.pixelSize: 13
+                }
+
+                Text {
+                    text: item.filename
+                    color: Theme.text
+                    font.family: Theme.fontSans
+                    font.pixelSize: 13
+                    elide: Text.ElideMiddle
+                    width: Math.min(implicitWidth, item.width - 300)
+                }
+            }
+
+            Text {
+                anchors.right: parent.right
+                anchors.rightMargin: 16
+                anchors.top: parent.top
+                anchors.topMargin: 15
+                text: item.transferState === 1 ? qsTr("Done")
+                    : item.transferState === 2 ? qsTr("Failed")
+                    : root.humanSize(item.received) + " / " + root.humanSize(item.total)
+                color: item.stateColor
+                font.family: Theme.fontMono
+                font.pixelSize: 11
+            }
+
+            // Progress track. Stays visible when finished so a completed row
+            // still reads as a full bar rather than an empty one.
+            Rectangle {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.leftMargin: 16
+                anchors.rightMargin: 16
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: 26
+                height: 3
+                radius: 1.5
+                color: Qt.rgba(1, 1, 1, 0.08)
+
+                Rectangle {
+                    width: parent.width * Math.max(0, Math.min(1, item.progress))
+                    height: parent.height
+                    radius: parent.radius
+                    color: item.stateColor
+                    Behavior on width { NumberAnimation { duration: 180 } }
+                }
+            }
+
+            Text {
+                anchors.left: parent.left
+                anchors.leftMargin: 16
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: 9
+                width: parent.width - 32
+                elide: Text.ElideMiddle
+                text: item.detail !== ""
+                      ? item.detail
+                      : (item.incoming ? qsTr("From %1") : qsTr("To %1")).arg(item.deviceName)
+                color: Theme.faint
+                font.family: Theme.fontMono
+                font.pixelSize: 10
+            }
+        }
+    }
+}

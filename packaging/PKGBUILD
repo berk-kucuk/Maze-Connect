@@ -1,0 +1,54 @@
+# Maintainer: Berk Küçük <dev.berkkucukk@gmail.com>
+
+pkgname=maze-connect
+pkgver=0.9.0
+pkgrel=1
+pkgdesc="Maze Linux device-link app — pair your phone over the LAN with verified, pinned mutual TLS"
+arch=('x86_64' 'aarch64')
+url="https://github.com/berk-kucuk/Maze-Connect"
+license=('GPL-3.0-only')
+depends=(
+    'qt6-base'
+    'qt6-declarative'
+    'kwindowsystem'
+    'openssl'
+)
+optdepends=('maze-tools: system dashboard — without it the dashboard says so and nothing else changes')
+makedepends=('cmake' 'ninja')
+# Opens TCP+UDP 38271 in the default zone on install, and closes them again
+# on removal. Without it the app links only on machines with no firewall,
+# and fails silently everywhere else.
+install="$pkgname.install"
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "$srcdir/$pkgname-$pkgver"
+    cmake -B build -S . -G Ninja \
+        -DCMAKE_BUILD_TYPE=None \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -DBUILD_TESTS=ON
+    cmake --build build
+}
+
+check() {
+    cd "$srcdir/$pkgname-$pkgver"
+    # The pairing, pinning and path-confinement tests are why this package
+    # has a check(): a regression there is a security regression, and it
+    # should stop the build rather than ship.
+    ctest --test-dir build --output-on-failure
+}
+
+package() {
+    cd "$srcdir/$pkgname-$pkgver"
+    DESTDIR="$pkgdir" cmake --install build
+}
+
+# THE SYSTEMD UNIT
+# Installs to /usr/lib/systemd/user/, never the system unit directory. Maze
+# Connect needs no privileges — unprivileged ports, and it writes only to the
+# user's own data directory — and it parses untrusted LAN input, so it must
+# never run as root. Enable it per account:
+#     systemctl --user enable --now mazeconnectd
+# The GUI (`maze-connect`) hosts the same service in-process; run one or the
+# other, not both, or they contend for the discovery port.

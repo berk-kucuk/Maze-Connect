@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Maze Connect
+Comment=Link your phone to this computer
+Exec=maze-connect
+Icon=maze-connect
+Terminal=false
+Categories=Network;RemoteAccess;Utility;
+Keywords=phone;android;sync;pair;

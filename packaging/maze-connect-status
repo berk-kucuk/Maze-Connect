@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""maze-connect-status — one JSON snapshot of this machine, for Maze Connect.
+
+Maze Connect is C++; `maze_status.py` (maze-tools) is Python and already
+carries every probe a dashboard needs — tested, and in daily use by
+maze-control-center and maze-welcome. Reimplementing those probes in C++ would
+create a second implementation to keep in step with the first, and the two
+would drift. So the desktop app runs this helper on a timer and forwards the
+JSON it prints.
+
+Takes no arguments and reads no input. That is deliberate: nothing a paired
+phone sends ever reaches this process. A phone can ask *whether* it runs, never
+*how* it runs. Every probe in maze_status is read-only and unprivileged.
+
+Exits non-zero with a plain-text reason when maze-tools is not installed, so
+the dashboard can say "not available" rather than render an empty machine.
+"""
+from __future__ import annotations
+
+import json
+import socket
+import sys
+import time
+
+# maze-control-center and maze-welcome add this to sys.path the same way;
+# maze_status is not installed as an importable package.
+MAZE_LIB = "/usr/local/lib/maze"
+
+# Long enough for the CPU delta to be meaningful, short enough that the
+# refresh timer does not feel stalled. See prime_cpu_sample().
+CPU_SAMPLE_SECONDS = 0.25
+
+
+def tri(value: bool | None) -> str:
+    """maze_status' three-state probes -> wire strings.
+
+    None means "unknown / not installed", which is not the same as "off" and
+    must not be flattened into it — a phone showing "Tor: inactive" for a
+    machine where Tor was never installed would be wrong.
+    """
+    if value is True:
+        return "active"
+    if value is False:
+        return "inactive"
+    return "unknown"
+
+
+def prime_cpu_sample(ms) -> None:
+    """Take the first /proc/stat sample so the reported CPU load is real.
+
+    cpu_usage_percent() is stateful by design: it returns the busy fraction
+    *since the previous call*, and the first call only primes the baseline and
+    returns 0.0. In a long-lived GUI on a refresh timer that is invisible. In a
+    one-shot process it is not — every snapshot would report 0% CPU forever.
+    """
+    try:
+        ms.cpu_usage_percent()
+        time.sleep(CPU_SAMPLE_SECONDS)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def collect(ms) -> dict:
+    """Build the snapshot, section by section.
+
+    Each section is gathered independently: one probe raising must cost that
+    section alone, not the whole report. A section that fails is named in
+    "unavailable" so the dashboard can say so instead of showing a blank
+    panel that looks like a healthy machine with nothing running.
+    """
+    snapshot: dict = {
+        "generated": int(time.time()),
+        "hostname": socket.gethostname(),
+    }
+    unavailable: list[str] = []
+
+    def section(name: str, build):
+        try:
+            snapshot[name] = build()
+        except Exception:  # noqa: BLE001
+            unavailable.append(name)
+
+    section("security", lambda: [
+        {"label": label, "unit": unit, "state": tri(active)}
+        for label, unit, active in ms.security_status()
+    ])
+
+    section("metrics", lambda: [
+        {
+            "key": m.get("key", ""),
+            "label": m.get("label", ""),
+            "percent": round(float(m.get("percent") or 0.0), 1),
+            "detail": m.get("detail") or "",
+        }
+        for m in ms.live_metrics()
+    ])
+
+    section("network", lambda: [
+        {"label": label, "value": value, "good": tri(good)}
+        for label, value, good in ms.network_info()
+    ])
+
+    section("facts", lambda: [
+        {"icon": icon, "value": value} for icon, value in ms.system_facts()
+    ])
+
+    def hardening():
+        checks, score = ms.hardening_report()
+        return {
+            "score": int(score),
+            "checks": [{"label": label, "passed": bool(ok)} for label, ok in checks],
+        }
+
+    section("hardening", hardening)
+
+    section("services", lambda: {
+        "tor": tri(ms.tor_status()),
+        "ollama": tri(ms.ollama_status()),
+    })
+
+    snapshot["unavailable"] = unavailable
+    return snapshot
+
+
+def main() -> int:
+    if len(sys.argv) > 1:
+        print("maze-connect-status takes no arguments", file=sys.stderr)
+        return 2
+
+    if MAZE_LIB not in sys.path:
+        sys.path.insert(0, MAZE_LIB)
+    try:
+        import maze_status as ms
+    except Exception as exc:  # noqa: BLE001
+        print(f"maze_status is not available: {exc}", file=sys.stderr)
+        return 3
+
+    prime_cpu_sample(ms)
+    json.dump(collect(ms), sys.stdout, ensure_ascii=False, separators=(",", ":"))
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

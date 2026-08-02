@@ -1,0 +1,75 @@
+# Maze Connect threat model
+
+Status: design outline, tracked alongside `docs/PROTOCOL.md`. This is the
+checklist every capability plugin (`core/src/plugins/*`) and transport
+change must be reviewed against before it ships.
+
+| Threat | Mitigation |
+|---|---|
+| MITM during pairing | public-key-bound Short Authentication String, mandatory human comparison, no auto-accept (see "Design decisions" below) |
+| MITM/rogue-AP after pairing | P-256 public-key pinning, hard-fail on mismatch, no silent re-TOFU |
+| Replay | monotonic per-session counters + replay window on top of TLS 1.3 |
+| Malicious/oversized payloads | per-message-type frame caps; reject before full buffering once the length prefix exceeds the cap |
+| Path traversal / zip-slip in file transfer | reject `..`, path separators, NUL/control chars in filenames; Unicode-normalize; confine all writes under one per-device subdirectory; write to a random temp name then atomic-rename; resolve realpath post-write and verify it is still inside the confinement root; never follow symlinks |
+| DoS from a rogue LAN peer | rate-limited discovery/pairing endpoints, per-peer connection limits, timeouts on unauthenticated handshake state, backpressure on file transfer |
+| Downgrade | TLS 1.3 hard-pinned min=max, no cleartext socket ever, no protocol-version negotiation to a weaker dialect |
+| Secure key storage (desktop) | long-term P-256 identity key written owner-only (0600) under the app data dir; a corrupt or unreadable key fails startup loudly rather than being silently regenerated, which would invalidate every pairing unnoticed |
+| systemd sandboxing (daemon) | `systemd --user` unit — see `daemon/systemd/mazeconnectd.service` — `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=read-only` with a single scoped `ReadWritePaths`, `PrivateTmp`, `PrivateDevices`, kernel/namespace/SUID restrictions, `MemoryDenyWriteExecute`, `SystemCallFilter=@system-service`, empty `CapabilityBoundingSet` |
+| Cert pinning enforcement | custom `QSslSocket` peer-cert verification callback checking the pinned fingerprint — never rely on system CA trust for paired-peer connections |
+| Reading this machine (`systemStatus`) | capability defaults **off** and is enabled per device, never globally; the snapshot comes from an unprivileged, read-only helper invoked with no arguments and no stdin, so nothing a peer sends reaches it; a report is only produced for a device that asked, and the capability is re-checked when the answer is sent, not only when it was requested |
+| Feature surface | clipboard sync, notification mirroring and ping/find-my-device were **removed** rather than kept behind switches — the privacy questions they raised are now moot, and `SecretDetector` went with them |
+
+Mirrors `Maze-Connect-Mobile`'s equivalent threat model; mobile-specific
+items (AndroidKeyStore, BiometricPrompt gating, manifest permission
+minimization, network security config) are tracked in that repo's own
+`docs/THREAT_MODEL.md` and must stay consistent with this one wherever the
+threat is shared (protocol-level threats above apply identically to both
+clients).
+
+
+## Design decisions that differ from the original plan
+
+Both were forced by what the platforms actually expose, and both were
+verified rather than assumed.
+
+### The SAS is bound to public keys, not the TLS exporter secret
+
+The plan called for binding the pairing code to the RFC 5705
+`tls-exporter` secret. Neither Qt's `QSslSocket` nor Android's
+`javax.net.ssl` exposes `SSL_export_keying_material`, so that binding is
+unreachable without replacing the whole TLS stack on both clients.
+
+Binding to both peers' long-term public keys preserves the property that
+matters. A man-in-the-middle cannot forge either key, so it must terminate
+TLS twice and present its own key to each side:
+
+    Alice sees (A, M)  ->  code_A = H(A, M, nonces)
+    Bob   sees (M, B)  ->  code_B = H(M, B, nonces)
+
+The two codes differ, the on-screen comparison fails, and pairing aborts.
+This is the same construction KDE Connect and Signal safety numbers use.
+Covered by `TestCrypto::sasDetectsManInTheMiddle` and
+`SasTest.detectsManInTheMiddle`.
+
+### Device identity is EC P-256, not Ed25519
+
+Three findings changed this, and the second is the security-relevant one:
+
+1. Qt 6's `QSslKey` has no Ed25519 algorithm (`QSsl::KeyAlgorithm` is
+   Rsa/Dsa/Ec/Dh/MlDsa), so an Ed25519 key cannot be handed to
+   `QSslSocket` without an opaque-handle escape hatch.
+2. Android's Keystore hardware-backs EC P-256 on essentially every
+   shipping device; Ed25519 is not hardware-backed. Choosing P-256 is what
+   actually lets the mobile private key live in the TEE/StrongBox and never
+   enter app memory — worth far more here than any difference in the
+   curves' own margins.
+3. SubjectPublicKeyInfo DER is byte-identical between OpenSSL's
+   `i2d_PUBKEY()` and Java's `PublicKey.getEncoded()`, so both clients
+   derive identical fingerprints and identical pairing codes with no custom
+   encoding to keep in sync.
+
+The cross-platform agreement is pinned by a known-answer test asserted on
+both sides: `TestCrypto::matchesCrossPlatformKnownAnswer` and
+`SasTest.matchesKnownAnswerFromSharedConstruction` both require the code
+`876154` for the same fixed input. If either derivation drifts, those fail
+rather than the two clients silently failing to pair in the field.

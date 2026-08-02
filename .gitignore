@@ -1,0 +1,24 @@
+build/
+build-*/
+compile_commands.json
+.qmlls-cache/
+*.qmlc
+*.jsc
+CMakeUserPresets.json
+CMakeCache.txt
+CMakeFiles/
+
+# Editor/IDE
+.vscode/
+.idea/
+*.kate-swp
+*.swp
+*.swo
+dist/
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+*.log
+*.bak
+*~

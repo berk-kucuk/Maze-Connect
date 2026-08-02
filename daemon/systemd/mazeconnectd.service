@@ -1,0 +1,77 @@
+# ==========================================================================
+#  THIS IS A `systemd --user` UNIT. IT MUST NEVER BE INSTALLED SYSTEM-WIDE.
+# ==========================================================================
+#
+# Maze Connect needs no privileges at all:
+#   - discovery listens on UDP 38271 (unprivileged, >1024)
+#   - the peer listener binds an ephemeral TCP port (unprivileged)
+#   - received files go to the user's own data directory
+#   - nothing touches devices, firewall rules, or system configuration
+#
+# Running it as root would therefore grant a network-facing service enormous
+# authority it has no use for — and this service parses attacker-controlled
+# input from the LAN, which is exactly the code you least want privileged.
+#
+# Correct location:   /usr/lib/systemd/user/mazeconnectd.service
+#                     (enable with: systemctl --user enable --now mazeconnectd)
+# WRONG location:     /etc/systemd/system/  or  /usr/lib/systemd/system/
+#
+# The `%h` specifier and `WantedBy=default.target` below are user-unit
+# conventions; if this file is placed among system units it would run as
+# root and %h would resolve to /root. The CMake install rules deliberately
+# target the user unit directory so this cannot happen by accident.
+
+[Unit]
+Description=Maze Connect — device-link background daemon
+Documentation=https://github.com/berk-kucuk/Maze-Connect
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/mazeconnect/mazeconnectd
+Restart=on-failure
+RestartSec=5
+
+# systemd creates and owns this directory, and exports its path as
+# $STATE_DIRECTORY — which DeviceManager::defaultDataDir() reads. That keeps
+# the daemon and the GUI pointed at the same identity without either of them
+# hard-coding a path, and avoids ReadWritePaths= failing on a directory that
+# does not exist yet on first run.
+StateDirectory=mazeconnect
+StateDirectoryMode=0700
+
+# Sandboxing. This process holds the long-term identity key and the mTLS
+# listen socket, and parses untrusted LAN input, so it gets the tightest
+# confinement the app has. See docs/THREAT_MODEL.md.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=tmpfs
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+# Only the address families this app actually speaks.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryDenyWriteExecute=true
+LockPersonality=true
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mazeconnectd
+
+[Install]
+WantedBy=default.target
