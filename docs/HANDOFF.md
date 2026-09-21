@@ -855,3 +855,113 @@ grubuyla aynı desen).
 capability + mesaj şekli assertion'ları eklendi.
 
 Sürüm 0.9.0. 13 test süiti geçiyor, uyarı yok.
+
+
+---
+
+## 1.0.1 — Devices görünümüne Scan butonu
+
+İstenen: mobil ve masaüstü sürümlerin ikisinde de bir tarama butonu.
+
+Keşif pasif çalışıyor, o yüzden boş bir cihaz listesi iki ayrı durumu aynı
+anda gösteriyor — ortada gerçekten bir şey yok, ya da biz dinlemeyi
+bıraktık — ve kullanıcının ikincisine müdahale etmek için uygulamayı
+yeniden başlatmaktan başka yolu yoktu.
+
+- `Beacon::refresh()`: soketi yeniden bind edip grubu her arayüzde yeniden
+  join ediyor. Sadece yeniden duyuru göndermek yetmez: bir multicast
+  üyeliği join edildiği **arayüze** aittir ve o küme `start()` anında bir
+  kez belirlenir. Sonradan kablo takmak, VPN bağlamak veya makineye yeni
+  bir adres vermek o arayüzde grubu join etmiş yapmıyor. Yeniden başlatmak
+  tek güvenilir çözüm ve maliyeti yok.
+- `DeviceManager::rescan()`: beacon'ı tazeliyor, bir sonraki tick yerine
+  hemen duyuru gönderiyor, eşleşmiş cihazları yeniden arıyor.
+- `Backend::rescanDevices()` slot'u, ve `DevicesView`'a gerçek bir başlık
+  satırı (SectionLabel "N devices" + Scan butonu). Buton kalıcı, sadece boş
+  durumda değil: bayat bir cihaz gösteren liste de en az boş liste kadar
+  taramaya muhtaç ve bu görünümde basılacak başka bir şey yok. Boş durumda
+  ayrıca "Scan again" var.
+
+Mobil karşılığı 0.10.3'te (`DeviceManager.rescan()` + `DevicesScreen`).
+
+Sürüm 1.0.1-1. `ctest` 13/13 geçti. QML, offscreen çalıştırmada tek uyarı
+üretmedi. `dist/maze-connect-1.0.1-1-x86_64.pkg.tar.zst`.
+
+
+---
+
+## 1.0.2 — bekleyen eşleştirme link kapanınca temizlenmiyordu
+
+`dropConnection()` `forgetPendingWork()` çağırıyor ama `m_pendingPairings`'e
+dokunmuyordu. `requestPairing()` o cihaz haritada dururken baştan
+`AlreadyPending` dönüyor, dolayısıyla el sıkışma ortasında kapanan bir
+linkin geride bıraktığı kayıt, sonraki her Pair basışını yalnızca bir durum
+satırı yazan no-op'a çeviriyor — çağrı hiç denenmiyor, karşı cihazda kesin
+olarak hiçbir şey olmuyor. `requestPairingAt()` içindeki
+`Connection::failed` yalnızca hiç kurulamayan çağrıyı kapsıyor; **kurulup
+sonra düşen** bir el sıkışma (karşı taraf rate-limit uyguladı, kullanıcı
+cevaplamadı, ağ takıldı) buradan geçiyor ve slotu süreç ömrü boyunca dolu
+bırakıyordu. Mobil taraftaki `_pendingPairing` hatasının (0.10.4) birebir
+aynası.
+
+Temiz bir kapanışta da `pairingFailed` yayılıyor, yoksa doğrulama katmanı
+gitmiş bir linkin üstünde asılı kalıyor.
+
+**Not:** bu gerçek bir hata ama 23 Ağustos'ta bildirilen "masaüstünden
+Pair'e basınca telefon cevap vermiyor" şikâyetinin sebebi değil —
+journald logu masaüstünün o sırada takılmadığını, el sıkışmanın
+`showing verification code` aşamasına kadar ilerlediğini gösteriyor.
+Sebep hâlâ açık; telefon tarafının logcat'ine ihtiyaç var.
+
+Sürüm 1.0.2-1. `ctest` 13/13.
+
+
+---
+
+## 1.0.3 — arayüz değişince keşif grubuna yeniden katıl
+
+Soru: masaüstünde maze-cloak MAC adresini sürekli değiştiriyor, bu Maze
+Connect'e engel olur mu?
+
+Ölçüldü. 17:50:56'da gerçek bir rotasyon oldu (`02:0c:29:…` →
+`02:21:5a:…`, kalıcı adres `34:5a:60:63:85:39`) ve hemen ardından:
+
+    IP           : 192.168.0.45  (degismedi)
+    /proc/net/igmp: enp42s0 -> 239.255.83.10  (uyelik duruyor)
+
+Yani bu rotasyon hiçbir şeyi bozmadı, çünkü `maze-cloak`'un `set_mac()`'i
+önce **link'i indirmeden** canlı değişikliği deniyor ve sürücü kabul etti.
+Kiralama da aynı adresi geri verdi.
+
+Ama bu şanslı yol. `set_mac()` canlı değişiklik reddedilirse
+`ip link set down` / `up` yoluna düşüyor, ve o yol üyeliği düşürüyor.
+Masaüstünün buna karşı **hiçbir savunması yoktu**: ağ değişikliğini izleyen
+bir şey yok, `Beacon::refresh()` yalnızca Scan butonundan çağrılıyordu.
+Sonuç asimetrik ve dışarıdan teşhisi berbat bir arıza olurdu — giden
+duyuru route'u izlediği için telefon bu bilgisayarı görmeye devam eder,
+bilgisayarın kendi listesi sessizce boşalır. (Mobilde 0.10.3'te düzelttiğim
+hatanın aynısının masaüstü versiyonu.)
+
+Düzeltme: `rejoinIfInterfacesChanged()`, zaten on saniyede bir çalışan
+reconnect süpürmesine takıldı. Up/running/non-loopback arayüzlerin
+ad+IPv4 imzasını karşılaştırıyor, değiştiyse beacon'ı tazeleyip hemen
+duyuru gönderiyor. İmzaya **adresler de dahil**: kiralama değişikliği
+arayüz listesini aynı bırakıp üstüne kurulan her şeyi geçersiz kılıyor.
+İlk geçişte tetiklenmiyor — `start()` daha yeni join etmişken çalışan bir
+soketi boşuna yıkmanın anlamı yok.
+
+Abone olmak yerine yoklamak bilinçli: Qt'nin `QNetworkInformation`'ı
+erişilebilirlik bildiriyor, arayüz topolojisini değil; NetworkManager'a
+DBus bağımlılığı ise bunu tek bir ağ yığınına bağlardı. Zaten atan bir
+timer'da on saniyede bir syscall'ın maliyeti yok.
+
+**Eşleştirme MAC'ten etkilenmiyor**, bu arada: pin `identity.key`'deki EC
+anahtarı, MAC ile hiçbir ilgisi yok. Bir rotasyon hiçbir koşulda
+eşleştirmeyi bozamaz.
+
+**Firewalld de engel değil** (ölçüldü): `public` zone target=DROP ama
+`maze-connect` servisi aktif, 38271/tcp + 38271/udp açık. Kanıt: telefonun
+beacon'ı bu firewall'un ardından alındı ve journald'da 15 tane
+`link established` var, yani gelen TCP de geçiyor.
+
+Sürüm 1.0.3-1. `ctest` 13/13.

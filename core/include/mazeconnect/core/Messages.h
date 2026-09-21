@@ -14,8 +14,9 @@ namespace mazeconnect::core {
 enum class MessageType {
     Unknown,
     Hello,          ///< identity + capability advertisement (first message)
-    PairRequest,    ///< initiator -> responder: begin pairing, carries nonce
+    PairRequest,    ///< initiator -> responder: begin pairing, carries commit(nonce)
     PairResponse,   ///< responder -> initiator: carries nonce
+    PairReveal,     ///< initiator -> responder: opens the commitment
     PairResult,     ///< either side: user accepted or rejected the SAS
     Unpair,         ///< either side: forget this peer
     FileOffer,      ///< announce an incoming file, awaits accept/reject
@@ -114,8 +115,11 @@ public:
                          const QString &deviceType,
                          Capabilities capabilities,
                          const QString &appVersion);
-    static Message pairRequest(quint64 counter, const QByteArray &nonce);
+    /// Carries commit(nonce), never the nonce itself — see Sas.h.
+    static Message pairRequest(quint64 counter, const QByteArray &commitment);
     static Message pairResponse(quint64 counter, const QByteArray &nonce);
+    /// Opens the initiator's commitment, after the responder is committed.
+    static Message pairReveal(quint64 counter, const QByteArray &nonce);
     static Message pairResult(quint64 counter, bool accepted);
     static Message unpair(quint64 counter);
     static Message fileOffer(quint64 counter,

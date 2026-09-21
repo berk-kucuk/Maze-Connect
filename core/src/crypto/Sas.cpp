@@ -13,6 +13,11 @@ namespace {
 // hash the protocol computes over the same key material.
 constexpr char kContext[] = "maze-connect/sas/v1";
 
+// Separate context for the pairing commitment. It must not collide with
+// kContext: the same nonce goes into both hashes, and reusing one string
+// would let a value computed for one purpose be presented as the other.
+constexpr char kCommitContext[] = "maze-connect/sas-commit/v1";
+
 // Public keys are SubjectPublicKeyInfo DER (see Identity). Bounds-checked
 // rather than fixed-size so a future curve change cannot silently pass a
 // malformed key, while still refusing anything that plainly did not come
@@ -42,6 +47,30 @@ QByteArray Sas::generateNonce() {
         return {};
     }
     return nonce;
+}
+
+QByteArray Sas::commit(const QByteArray &nonce) {
+    if (nonce.size() != kNonceSize) {
+        return {};
+    }
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    hash.addData(QByteArrayView(kCommitContext,
+                                static_cast<qsizetype>(sizeof(kCommitContext) - 1)));
+    appendLengthPrefixed(hash, nonce);
+    return hash.result();
+}
+
+bool Sas::verifyCommitment(const QByteArray &commitment, const QByteArray &nonce) {
+    const QByteArray expected = commit(nonce);
+    if (expected.isEmpty() || commitment.size() != expected.size()) {
+        return false;
+    }
+    // Constant-time: never leak how far a forged commitment got.
+    quint8 diff = 0;
+    for (qsizetype i = 0; i < expected.size(); ++i) {
+        diff |= static_cast<quint8>(commitment[i]) ^ static_cast<quint8>(expected[i]);
+    }
+    return diff == 0;
 }
 
 QString Sas::derive(const QByteArray &initiatorPublicKey,

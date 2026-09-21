@@ -18,6 +18,26 @@ _zone_note() {
     printf '  Undo with: firewall-cmd --permanent --remove-service=maze-connect && firewall-cmd --reload\n'
 }
 
+# firewall-cmd ALWAYS talks to the firewalld daemon over D-Bus — `--permanent`
+# only selects which config it edits, it does not make the command work without a
+# daemon. So every install that happens while firewalld is not running silently
+# failed to get the rule: the ISO build's pacstrap chroot, and the Calamares
+# install chroot. Result: freshly installed machines had the service definition
+# but no zone rule, and phones could not reach the desktop — the exact "quietly
+# fails to link" failure this scriptlet exists to prevent.
+#
+# firewall-offline-cmd is the tool for that case: it edits the on-disk zone
+# directly, no daemon needed. Use whichever fits the situation.
+_add_rule() {
+    if firewall-cmd --state >/dev/null 2>&1; then
+        firewall-cmd --permanent --add-service=maze-connect >/dev/null 2>&1
+    elif command -v firewall-offline-cmd >/dev/null 2>&1; then
+        firewall-offline-cmd --add-service=maze-connect >/dev/null 2>&1
+    else
+        return 1
+    fi
+}
+
 _open_ports() {
     # No firewalld, nothing to arrange. Not an error: plenty of installs run
     # without one, and the application is unaffected.
@@ -25,9 +45,7 @@ _open_ports() {
         return
     fi
 
-    # --permanent works against the on-disk config even when the daemon is
-    # stopped, so the rule is still there the next time firewalld starts.
-    if ! firewall-cmd --permanent --add-service=maze-connect >/dev/null 2>&1; then
+    if ! _add_rule; then
         printf '  Maze Connect: could not add the firewalld rule automatically.\n'
         printf '  Run: firewall-cmd --permanent --add-service=maze-connect && firewall-cmd --reload\n'
         return
@@ -35,20 +53,23 @@ _open_ports() {
 
     # Only reload a daemon that is actually running; --reload against a
     # stopped firewalld fails, and it would be a confusing error to print
-    # after having just succeeded.
+    # after having just succeeded. (When the daemon is down the offline edit
+    # above is already on disk and takes effect when firewalld next starts.)
     if firewall-cmd --state >/dev/null 2>&1; then
         firewall-cmd --reload >/dev/null 2>&1 || true
+        _zone_note
     fi
-    _zone_note
 }
 
 _close_ports() {
     if ! command -v firewall-cmd >/dev/null 2>&1; then
         return
     fi
-    firewall-cmd --permanent --remove-service=maze-connect >/dev/null 2>&1 || true
     if firewall-cmd --state >/dev/null 2>&1; then
+        firewall-cmd --permanent --remove-service=maze-connect >/dev/null 2>&1 || true
         firewall-cmd --reload >/dev/null 2>&1 || true
+    elif command -v firewall-offline-cmd >/dev/null 2>&1; then
+        firewall-offline-cmd --remove-service=maze-connect >/dev/null 2>&1 || true
     fi
 }
 

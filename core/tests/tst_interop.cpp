@@ -67,7 +67,7 @@ void TestInterop::controlEnvelopeKeys() {
     Message ping = Message::unpair(42);
     const QJsonObject obj = QJsonDocument::fromJson(ping.toJson()).object();
 
-    QCOMPARE(obj.value(QLatin1StringView("v")).toInt(), 3);
+    QCOMPARE(obj.value(QLatin1StringView("v")).toInt(), 4);
     QCOMPARE(obj.value(QLatin1StringView("t")).toString(), QStringLiteral("unpair"));
     QCOMPARE(obj.value(QLatin1StringView("c")).toDouble(), 42.0);
 
@@ -75,6 +75,7 @@ void TestInterop::controlEnvelopeKeys() {
     QCOMPARE(Message::typeName(MessageType::Hello), QStringLiteral("hello"));
     QCOMPARE(Message::typeName(MessageType::PairRequest), QStringLiteral("pairRequest"));
     QCOMPARE(Message::typeName(MessageType::PairResponse), QStringLiteral("pairResponse"));
+    QCOMPARE(Message::typeName(MessageType::PairReveal), QStringLiteral("pairReveal"));
     QCOMPARE(Message::typeName(MessageType::PairResult), QStringLiteral("pairResult"));
     QCOMPARE(Message::typeName(MessageType::FileOffer), QStringLiteral("fileOffer"));
 }
@@ -87,15 +88,34 @@ void TestInterop::pairRequestNonceEncoding() {
         nonce[i] = static_cast<char>(i);
     }
 
-    Message request = Message::pairRequest(1, nonce);
-    const QJsonObject obj = QJsonDocument::fromJson(request.toJson()).object();
-    QCOMPARE(obj.value(QLatin1StringView("nonce")).toString(),
+    // PairRequest carries the COMMITMENT, never the nonce. If either client
+    // ever puts the nonce back in this message the commitment round is gone
+    // and the on-screen code stops meaning anything (Sas.h), so the absence
+    // of the key is asserted as strictly as its presence.
+    Message request = Message::pairRequest(1, Sas::commit(nonce));
+    const QJsonObject reqObj = QJsonDocument::fromJson(request.toJson()).object();
+    QVERIFY(!reqObj.contains(QLatin1StringView("nonce")));
+    QCOMPARE(reqObj.value(QLatin1StringView("commitment")).toString(),
+             QStringLiteral("Jz2nu+C6nOgcIlgQwwHoK6148NvbSJrusnW6o8PaWj4="));
+
+    // The nonce itself travels in PairReveal, base64 the same way.
+    Message reveal = Message::pairReveal(2, nonce);
+    const QJsonObject revObj = QJsonDocument::fromJson(reveal.toJson()).object();
+    QCOMPARE(revObj.value(QLatin1StringView("nonce")).toString(),
              QStringLiteral("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="));
 
     // And it survives a round trip through the validated accessor.
-    Message parsed = Message::parse(request.toJson());
+    Message parsed = Message::parse(reveal.toJson());
     QVERIFY(parsed.isValid());
     QCOMPARE(parsed.binary(QLatin1StringView("nonce"), Sas::kNonceSize), nonce);
+
+    // Cross-platform known answer for the commitment, asserted on both
+    // clients: a drift in the context string or the length prefix would
+    // otherwise show up only as pairings that silently fail in the field.
+    Message parsedRequest = Message::parse(request.toJson());
+    QVERIFY(parsedRequest.isValid());
+    QVERIFY(Sas::verifyCommitment(
+        parsedRequest.binary(QLatin1StringView("commitment"), Sas::kCommitSize), nonce));
 }
 
 void TestInterop::dataFrameTransferIdLayout() {
@@ -121,25 +141,27 @@ void TestInterop::dataFrameTransferIdLayout() {
 void TestInterop::counterZeroIsRejected() {
     // Both sides reserve 0 so an absent or zeroed counter is never a valid
     // first message.
-    const QByteArray zero = QByteArrayLiteral(R"({"v":3,"t":"unpair","c":0})");
+    const QByteArray zero = QByteArrayLiteral(R"({"v":4,"t":"unpair","c":0})");
     QVERIFY(!Message::parse(zero).isValid());
 
-    const QByteArray missing = QByteArrayLiteral(R"({"v":3,"t":"unpair"})");
+    const QByteArray missing = QByteArrayLiteral(R"({"v":4,"t":"unpair"})");
     QVERIFY(!Message::parse(missing).isValid());
 
-    const QByteArray negative = QByteArrayLiteral(R"({"v":3,"t":"unpair","c":-1})");
+    const QByteArray negative = QByteArrayLiteral(R"({"v":4,"t":"unpair","c":-1})");
     QVERIFY(!Message::parse(negative).isValid());
 
-    const QByteArray valid = QByteArrayLiteral(R"({"v":3,"t":"unpair","c":1})");
+    const QByteArray valid = QByteArrayLiteral(R"({"v":4,"t":"unpair","c":1})");
     QVERIFY(Message::parse(valid).isValid());
 }
 
 void TestInterop::versionMismatchIsRejected() {
     // No negotiation to an older dialect: a mismatch is a hard stop.
-    QVERIFY(!Message::parse(QByteArrayLiteral(R"({"v":4,"t":"unpair","c":1})")).isValid());
-    QVERIFY(!Message::parse(QByteArrayLiteral(R"({"v":2,"t":"unpair","c":1})")).isValid());
+    QVERIFY(!Message::parse(QByteArrayLiteral(R"({"v":5,"t":"unpair","c":1})")).isValid());
+    // v3 is the version that sent the nonce in the clear. Refusing it is the
+    // point of the bump: negotiating down would restore the grinding attack.
+    QVERIFY(!Message::parse(QByteArrayLiteral(R"({"v":3,"t":"unpair","c":1})")).isValid());
     QVERIFY(!Message::parse(QByteArrayLiteral(R"({"t":"unpair","c":1})")).isValid());
-    QVERIFY(!Message::parse(QByteArrayLiteral(R"({"v":3,"t":"nope","c":1})")).isValid());
+    QVERIFY(!Message::parse(QByteArrayLiteral(R"({"v":4,"t":"nope","c":1})")).isValid());
 }
 
 void TestInterop::sasKnownAnswer() {

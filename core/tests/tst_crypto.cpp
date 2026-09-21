@@ -16,6 +16,8 @@ private slots:
     void sasIsDeterministicAndSymmetric();
     void sasDiffersForDifferentPeers();
     void sasDetectsManInTheMiddle();
+    void commitmentBindsTheNonce();
+    void commitmentStopsAGrindingManInTheMiddle();
     void sasRejectsMalformedInput();
     void nonceIsRandom();
     void matchesCrossPlatformKnownAnswer();
@@ -117,6 +119,78 @@ void TestCrypto::sasDetectsManInTheMiddle() {
     QVERIFY(!shownToBob.isEmpty());
     QVERIFY2(shownToAlice != shownToBob,
              "MITM produced matching codes on both devices — pairing would succeed");
+}
+
+void TestCrypto::commitmentBindsTheNonce() {
+    const QByteArray nonce = Sas::generateNonce();
+    const QByteArray other = Sas::generateNonce();
+    const QByteArray commitment = Sas::commit(nonce);
+
+    QCOMPARE(commitment.size(), qsizetype(Sas::kCommitSize));
+    QVERIFY(Sas::verifyCommitment(commitment, nonce));
+    // Binding: no other nonce opens this commitment.
+    QVERIFY(!Sas::verifyCommitment(commitment, other));
+    // Deterministic, so both clients compute the same value.
+    QCOMPARE(Sas::commit(nonce), commitment);
+    // Domain-separated from the SAS hash over the same material.
+    QVERIFY(Sas::commit(nonce) != Sas::commit(other));
+
+    // Malformed input is a hard failure, never a commitment to nothing.
+    QVERIFY(Sas::commit(QByteArray()).isEmpty());
+    QVERIFY(Sas::commit(QByteArray(Sas::kNonceSize - 1, 'x')).isEmpty());
+    QVERIFY(!Sas::verifyCommitment(QByteArray(), nonce));
+    QVERIFY(!Sas::verifyCommitment(commitment, QByteArray()));
+}
+
+void TestCrypto::commitmentStopsAGrindingManInTheMiddle() {
+    // sasDetectsManInTheMiddle above only covers a PASSIVE relay — one that
+    // picks its nonces at random and hopes. That is not the attack.
+    //
+    // The real one: Mallory runs both halves, finishes the Bob side first so
+    // code_B is fixed, then searches its OWN nonce until the Alice side comes
+    // out equal. The space is 10^6, so it lands in well under a second, both
+    // humans see the same six digits, and both confirm. Nothing about the
+    // key-binding argument prevents it — what prevents it is having to be
+    // committed to a nonce before seeing the other side's.
+    //
+    // This test performs that search and asserts the commitment is what
+    // refuses the result. Capped so a run cannot hang; the cap is far above
+    // the ~10^6 expected trials only because failing to find a collision
+    // would make the test pass vacuously, and the QVERIFY below catches that.
+    const Identity alice = Identity::generate(QStringLiteral("alice"));
+    const Identity bob = Identity::generate(QStringLiteral("bob"));
+    const Identity mToAlice = Identity::generate(QStringLiteral("mallory-a"));
+    const Identity mToBob = Identity::generate(QStringLiteral("mallory-b"));
+
+    // ---- Bob's half, completed first: Mallory is the initiator there ------
+    const QByteArray nMalloryToBob = Sas::generateNonce();
+    const QByteArray nBob = Sas::generateNonce();
+    const QString codeBob =
+        Sas::derive(mToBob.publicKey(), bob.publicKey(), nMalloryToBob, nBob);
+    QCOMPARE(codeBob.size(), Sas::kDigits);
+
+    // ---- Alice's half: Mallory is the responder, and grinds --------------
+    const QByteArray nAlice = Sas::generateNonce();
+    QByteArray forged;
+    bool found = false;
+    for (int attempt = 0; attempt < 40'000'000 && !found; ++attempt) {
+        const QByteArray candidate = Sas::generateNonce();
+        if (Sas::derive(alice.publicKey(), mToAlice.publicKey(), nAlice, candidate) == codeBob) {
+            forged = candidate;
+            found = true;
+        }
+    }
+    QVERIFY2(found, "could not grind a colliding nonce - test would be vacuous");
+
+    // The grind works: this is exactly what both users would have seen.
+    QCOMPARE(Sas::derive(alice.publicKey(), mToAlice.publicKey(), nAlice, forged), codeBob);
+
+    // And this is why it no longer helps. Mallory had to send its commitment
+    // to Bob before Bob's nonce existed, so the nonce it wants to use now is
+    // not the one it is bound to, and Bob's side aborts on the mismatch.
+    const QByteArray committed = Sas::commit(nMalloryToBob);
+    QVERIFY(!Sas::verifyCommitment(committed, forged));
+    QVERIFY(Sas::verifyCommitment(committed, nMalloryToBob));
 }
 
 void TestCrypto::sasRejectsMalformedInput() {

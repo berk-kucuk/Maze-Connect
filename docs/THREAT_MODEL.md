@@ -51,6 +51,25 @@ This is the same construction KDE Connect and Signal safety numbers use.
 Covered by `TestCrypto::sasDetectsManInTheMiddle` and
 `SasTest.detectsManInTheMiddle`.
 
+**That argument is only true with the commitment round, and for a while it
+was not there.** The nonce exchange used to be one round — the initiator
+sent its nonce, the responder answered with its own — which let the
+man-in-the-middle above choose its nonce *after* seeing the other side's.
+It would complete the Bob half first, fixing `code_B`, then search its own
+nonce until `code_A` came out equal: a 10^6 space, well under a second,
+after which both users see the same six digits and confirm. Key binding
+does not prevent this, because Mallory is not forging a key — it is
+steering the only input it controls.
+
+Pairing is therefore three messages, with the initiator committing to its
+nonce before the responder picks one (see docs/PROTOCOL.md §Pairing).
+Neither half of a man-in-the-middle can move its contribution after
+learning the other's. `TestCrypto::commitmentStopsAGrindingManInTheMiddle`
+and `SasTest.commitmentStopsAGrindingManInTheMiddle` perform the grind for
+real and then assert the commitment refuses the result — the passive-relay
+tests above would have stayed green throughout the weakness, which is why
+they are not enough on their own.
+
 ### Device identity is EC P-256, not Ed25519
 
 Three findings changed this, and the second is the security-relevant one:

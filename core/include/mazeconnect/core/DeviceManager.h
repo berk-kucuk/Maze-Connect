@@ -111,6 +111,18 @@ public:
     const GuardBridge *guardBridge() const { return &m_guard; }
 
     QList<DiscoveredDevice> discoveredDevices() const;
+
+    /**
+     * Re-run discovery, because the user asked.
+     *
+     * Rebinds the beacon (see Beacon::refresh() for why that is not merely
+     * a re-announce), sends an announcement immediately rather than at the
+     * next tick, and redials anything paired. Distinct from the automatic
+     * sweep only in that a person pressed it: discovery is passive, so an
+     * empty device list cannot be told apart from a broken listener, and
+     * this is what makes that case actionable instead of a restart.
+     */
+    void rescan();
     QList<PairedDevice> pairedDevices() const { return m_store.devices(); }
     bool isConnected(const QString &deviceId) const;
 
@@ -238,6 +250,8 @@ private:
         Capabilities peerCapabilities = Capability::None;
         QByteArray ourNonce;
         QByteArray theirNonce;
+        /// What the initiator committed to, until PairReveal opens it.
+        QByteArray theirCommitment;
     };
 
     bool loadOrCreateIdentity(const QString &deviceName);
@@ -294,6 +308,15 @@ private:
      */
     void maybeConnectTo(const DiscoveredDevice &device);
     void reconnectPairedDevices();
+
+    /// Re-join the discovery group if the interfaces moved under it.
+    /// Runs on the reconnect sweep; see the definition for why this is
+    /// polled rather than subscribed to.
+    void rejoinIfInterfacesChanged();
+
+    /// Interface+address fingerprint from the last sweep. Null until the
+    /// first one, which must not trigger a refresh.
+    QString m_interfaceSignature;
 
     QString m_dataDir;
     QString m_deviceId;

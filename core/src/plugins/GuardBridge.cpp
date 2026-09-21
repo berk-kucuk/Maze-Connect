@@ -87,6 +87,11 @@ QString GuardBridge::socketPath() {
     if (!override.isEmpty()) {
         return override;
     }
+    // maze-guardd (maze-tools) — the privileged-action broker that owns panic and
+    // the hardware killswitches. NOT /run/maze/maze.sock: that belongs to a
+    // DIFFERENT daemon, maze-guard's own helper, which does MAC randomisation and
+    // does not speak this STATUS/KILL protocol. Pointing here at maze.sock makes
+    // the connection succeed and then hang forever with no reply.
     return QStringLiteral("/run/maze/guard.sock");
 }
 

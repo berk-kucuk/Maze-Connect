@@ -6,6 +6,7 @@
 #include "mazeconnect/core/Version.h"
 
 #include <QCryptographicHash>
+#include <QNetworkInterface>
 #include <QDir>
 #include <QFile>
 #include <QJsonDocument>
@@ -301,7 +302,10 @@ bool DeviceManager::start(const QString &deviceName, const QString &deviceType) 
     // already announcing before we started, or whose link dropped while it
     // stayed visible, would otherwise never be retried.
     m_reconnectTimer.setInterval(kReconnectIntervalMs);
-    connect(&m_reconnectTimer, &QTimer::timeout, this, &DeviceManager::reconnectPairedDevices);
+    connect(&m_reconnectTimer, &QTimer::timeout, this, [this]() {
+        rejoinIfInterfacesChanged();
+        reconnectPairedDevices();
+    });
     m_reconnectTimer.start();
 
     m_beacon = new Beacon(this);
@@ -337,6 +341,73 @@ void DeviceManager::stop() {
 
 QList<DiscoveredDevice> DeviceManager::discoveredDevices() const {
     return m_beacon ? m_beacon->devices() : QList<DiscoveredDevice>{};
+}
+
+/**
+ * Re-join the discovery group when the interfaces underneath it have moved.
+ *
+ * A multicast membership belongs to the interface it was joined on, and
+ * Beacon::start() decides that set once. Anything that takes an interface
+ * down and back up — a cable, a VPN, suspend/resume, or a MAC rotation that
+ * had to fall back to `ip link down/up` because the driver refused a live
+ * change — drops the membership without telling anyone. The listener keeps
+ * running, announcements keep going out (an outgoing datagram just follows
+ * the route), and the machine simply stops *hearing* anyone. That asymmetry
+ * is miserable to diagnose from the outside: the phone still lists this
+ * computer while this computer's own list quietly empties.
+ *
+ * Detected rather than subscribed to. Qt's QNetworkInformation reports
+ * reachability, not interface topology, and a DBus dependency on
+ * NetworkManager would tie this to one network stack. Comparing a cheap
+ * signature on a timer that already fires costs a syscall every ten seconds
+ * and has no such coupling.
+ *
+ * The signature deliberately includes addresses, not just names: a lease
+ * change that hands the machine a new address leaves the interface list
+ * identical while invalidating everything built on top of it.
+ */
+void DeviceManager::rejoinIfInterfacesChanged() {
+    QStringList parts;
+    for (const QNetworkInterface &iface : QNetworkInterface::allInterfaces()) {
+        const auto flags = iface.flags();
+        if (!flags.testFlag(QNetworkInterface::IsUp)
+            || !flags.testFlag(QNetworkInterface::IsRunning)
+            || flags.testFlag(QNetworkInterface::IsLoopBack)) {
+            continue;
+        }
+        for (const QNetworkAddressEntry &entry : iface.addressEntries()) {
+            const QHostAddress ip = entry.ip();
+            if (ip.protocol() != QAbstractSocket::IPv4Protocol) {
+                continue;
+            }
+            parts << (iface.name() + QLatin1Char('=') + ip.toString());
+        }
+    }
+    parts.sort();
+    const QString signature = parts.join(QLatin1Char(','));
+
+    if (signature == m_interfaceSignature) {
+        return;
+    }
+    // Not on the first pass: start() has only just joined, and refreshing
+    // here would tear down a working socket for nothing.
+    const bool firstPass = m_interfaceSignature.isNull();
+    m_interfaceSignature = signature;
+    if (firstPass || !m_beacon) {
+        return;
+    }
+    qCInfo(lcLink) << "network interfaces changed; re-joining discovery";
+    m_beacon->refresh();
+    m_beacon->announceNow();
+}
+
+void DeviceManager::rescan() {
+    qCInfo(lcLink) << "manual rescan";
+    if (m_beacon) {
+        m_beacon->refresh();
+        m_beacon->announceNow();
+    }
+    reconnectPairedDevices();
 }
 
 bool DeviceManager::isConnected(const QString &deviceId) const {
@@ -432,8 +503,30 @@ void DeviceManager::dropConnection(Connection *connection, const QString &reason
 
         forgetPendingWork(deviceId);
 
+        // A pairing in progress dies with its link, and this is not
+        // bookkeeping — it is the difference between a Pair button that
+        // works and one that never works again.
+        //
+        // requestPairing() refuses outright while m_pendingPairings holds
+        // the device ("AlreadyPending"), so an entry left behind by a link
+        // that closed mid-handshake makes every later press a no-op that
+        // does nothing but set a status line. The dial itself is never
+        // attempted, so from the other device's side absolutely nothing
+        // happens, which is exactly how the fault was reported. The
+        // Connection::failed handler in requestPairingAt() only covers a
+        // dial that never came up; a handshake that *succeeded* and then
+        // dropped — the peer rate-limited us, the user never answered the
+        // prompt, the network blinked — came through here instead and left
+        // the slot occupied for the lifetime of the process.
+        const bool wasPairing = m_pendingPairings.remove(deviceId) > 0;
+
         if (!reason.isEmpty() && !wasTrusted) {
             emit pairingFailed(deviceId, reason);
+        } else if (wasPairing) {
+            // A pairing that ended on a clean disconnect still has to tell
+            // the UI, or the verification overlay stays up over a link that
+            // is gone.
+            emit pairingFailed(deviceId, tr("the other device closed the connection"));
         }
         if (wasTrusted && !deviceId.isEmpty()) {
             emit deviceDisconnected(deviceId);
@@ -530,6 +623,7 @@ void DeviceManager::handleMessage(Connection *connection, const Message &message
         case MessageType::Hello:
         case MessageType::PairRequest:
         case MessageType::PairResponse:
+        case MessageType::PairReveal:
         case MessageType::PairResult:
             break;
         default:
@@ -540,7 +634,7 @@ void DeviceManager::handleMessage(Connection *connection, const Message &message
             // reconnects only to be refused again.
             //
             // Safe unconditionally: a peer genuinely mid-pairing only sends
-            // the four types above and never reaches this branch.
+            // the five types above and never reaches this branch.
             connection->send(Message::unpair(connection->nextCounter()));
             dropConnection(connection,
                            QStringLiteral("unpaired peer attempted %1")
@@ -612,17 +706,59 @@ void DeviceManager::handleMessage(Connection *connection, const Message &message
             return;
         }
 
-        const QByteArray theirNonce = message.binary(QLatin1StringView("nonce"), Sas::kNonceSize);
-        if (theirNonce.isEmpty()) {
-            dropConnection(connection, QStringLiteral("malformed pairing nonce"));
+        // The request carries only a COMMITMENT to the initiator's nonce. We
+        // must choose ours without knowing theirs — that is the whole point of
+        // the round; see Sas.h. No code is derived and nothing is shown to the
+        // user yet: that waits for PairReveal.
+        const QByteArray theirCommitment =
+            message.binary(QLatin1StringView("commitment"), Sas::kCommitSize);
+        if (theirCommitment.isEmpty()) {
+            dropConnection(connection, QStringLiteral("malformed pairing commitment"));
             return;
         }
-        link->theirNonce = theirNonce;
+        link->theirCommitment = theirCommitment;
+        link->theirNonce.clear();
         link->ourNonce = Sas::generateNonce();
         if (link->ourNonce.isEmpty()) {
             dropConnection(connection, QStringLiteral("could not generate a pairing nonce"));
             return;
         }
+
+        Message response = Message::pairResponse(connection->nextCounter(), link->ourNonce);
+        connection->send(response);
+        break;
+    }
+
+    case MessageType::PairReveal: {
+        // The initiator opens the commitment it sent in PairRequest. Until it
+        // matches, the nonce is not theirs to choose any more, and only now can
+        // the code be derived honestly.
+        if (link->trusted) {
+            dropConnection(connection, QStringLiteral("pair reveal on an already-paired link"));
+            return;
+        }
+        if (link->theirCommitment.isEmpty() || link->ourNonce.isEmpty()) {
+            dropConnection(connection, QStringLiteral("pair reveal without a pair request"));
+            return;
+        }
+        if (m_pendingPairings.contains(link->deviceId)) {
+            dropConnection(connection, QStringLiteral("pair reveal repeated"));
+            return;
+        }
+
+        const QByteArray theirNonce = message.binary(QLatin1StringView("nonce"), Sas::kNonceSize);
+        if (theirNonce.isEmpty()) {
+            dropConnection(connection, QStringLiteral("malformed pairing nonce"));
+            return;
+        }
+        if (!Sas::verifyCommitment(link->theirCommitment, theirNonce)) {
+            // A nonce that is not the one committed to means the peer tried to
+            // pick it after seeing ours — which is exactly the move a
+            // man-in-the-middle needs to make both screens agree.
+            dropConnection(connection, QStringLiteral("pairing commitment does not match"));
+            return;
+        }
+        link->theirNonce = theirNonce;
 
         // We are the responder: the initiator's key comes first.
         const QString code = Sas::derive(connection->peerPublicKey(), m_identity.publicKey(),
@@ -631,9 +767,6 @@ void DeviceManager::handleMessage(Connection *connection, const Message &message
             dropConnection(connection, QStringLiteral("could not derive a verification code"));
             return;
         }
-
-        Message response = Message::pairResponse(connection->nextCounter(), link->ourNonce);
-        connection->send(response);
 
         PendingPairing pairing;
         pairing.deviceId = link->deviceId;
@@ -668,6 +801,13 @@ void DeviceManager::handleMessage(Connection *connection, const Message &message
             dropConnection(connection, QStringLiteral("could not derive a verification code"));
             return;
         }
+
+        // Only now open our commitment. Sending the nonce earlier would have
+        // let the responder choose theirs against a known value, which is the
+        // whole thing the commitment exists to prevent — and revealing it
+        // AFTER deriving keeps the ordering obvious to anyone reading this.
+        connection->send(Message::pairReveal(connection->nextCounter(), link->ourNonce));
+
         it->verificationCode = code;
         it->peerPublicKey = connection->peerPublicKey();
         emit pairingRequested(*it);
@@ -1238,7 +1378,13 @@ bool DeviceManager::requestPairingAt(const QHostAddress &address, quint16 port,
             dropConnection(connection, QStringLiteral("could not generate a pairing nonce"));
             return;
         }
-        Message request = Message::pairRequest(connection->nextCounter(), link->ourNonce);
+        // Commit to the nonce now, reveal it only after PairResponse lands.
+        const QByteArray commitment = Sas::commit(link->ourNonce);
+        if (commitment.isEmpty()) {
+            dropConnection(connection, QStringLiteral("could not commit to the pairing nonce"));
+            return;
+        }
+        Message request = Message::pairRequest(connection->nextCounter(), commitment);
         connection->send(request);
     });
     connect(connection, &Connection::failed, this, [this, deviceId](const QString &reason) {

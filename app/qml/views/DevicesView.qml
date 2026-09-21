@@ -18,9 +18,38 @@ Item {
         onAccepted: Backend.sendFile(root.selectedDeviceId, selectedFile)
     }
 
+    // A header rather than a floating button: a list showing a stale device
+    // needs a rescan exactly as much as an empty one does, and this view has
+    // nothing else to press.
+    Item {
+        id: header
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: parent.top
+        height: scanButton.height
+
+        SectionLabel {
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: list.count === 1 ? qsTr("1 device") : qsTr("%1 devices").arg(list.count)
+        }
+
+        MazeButton {
+            id: scanButton
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            text: qsTr("Scan")
+            onClicked: Backend.rescanDevices()
+        }
+    }
+
     ListView {
         id: list
-        anchors.fill: parent
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: header.bottom
+        anchors.bottom: parent.bottom
+        anchors.topMargin: 12
         clip: true
         spacing: 10
         model: Backend.devices
@@ -66,6 +95,13 @@ Item {
                 color: Theme.faint
                 font.family: Theme.fontSans
                 font.pixelSize: 11
+            }
+
+            MazeButton {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: qsTr("Scan again")
+                primary: true
+                onClicked: Backend.rescanDevices()
             }
         }
 

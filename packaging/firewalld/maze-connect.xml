@@ -1,25 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  firewalld service definition for Maze Connect.
+firewalld service definition for Maze Connect.
 
-  Both ports carry the same number so there is one to remember:
-    * TCP 38271 — the mutual-TLS link. Everything meaningful happens here,
-      and every byte of it is authenticated and pinned before this
-      application sees it.
-    * UDP 38271 — the discovery beacon. Unauthenticated and informational
-      only; it populates a "nearby devices" list and nothing in it is acted
-      on before pairing completes.
+Both ports carry the same number so there is one to remember:
+* TCP 38271 — the mutual-TLS link. Everything meaningful happens here,
+and every byte of it is authenticated and pinned before this
+application sees it.
+* UDP 38271 — the discovery beacon. Unauthenticated and informational
+only; it populates a "nearby devices" list and nothing in it is acted
+on before pairing completes.
 
-  Opening these does not widen the trust model. An unpaired peer that
-  reaches the TCP port can send pairing messages and nothing else, and
-  pairing still requires a six-digit code to be compared by a human on both
-  screens. What the rule fixes is the opposite failure: a firewall silently
-  dropping the link so that two devices which have already been paired
-  simply never see each other.
+Opening these does not widen the trust model. An unpaired peer that
+reaches the TCP port can send pairing messages and nothing else, and
+pairing still requires a six-digit code to be compared by a human on both
+screens. What the rule fixes is the opposite failure: a firewall silently
+dropping the link so that two devices which have already been paired
+simply never see each other.
 
-  Installing this file only *defines* the service. Adding it to a zone is
-  done by the package's install scriptlet, and can be undone with
-      firewall-cmd --permanent --remove-service=maze-connect && firewall-cmd --reload
+Installing this file only *defines* the service. Adding it to a zone is
+done by the package's install scriptlet.
 -->
 <service>
   <short>Maze Connect</short>

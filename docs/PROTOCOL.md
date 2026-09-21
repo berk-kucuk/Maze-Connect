@@ -40,7 +40,27 @@ message ordering across reconnects is a property TLS does not give us.
    peer cert intentionally unverified. This insecure window exists *only*
    inside the explicit, user-initiated pairing flow — never reachable from
    the normal post-pairing connection path.
-2. Both sides exchange SubjectPublicKeyInfo DER public keys + a fresh nonce over that channel.
+2. Three messages, not two. The nonce exchange is **committed**: the
+   initiator sends only a hash of its nonce first, and opens it after the
+   responder has already sent its own.
+
+   ```
+   initiator -> responder : PairRequest  { commitment = commit(N_i) }
+   responder -> initiator : PairResponse { nonce = N_r }
+   initiator -> responder : PairReveal   { nonce = N_i }
+   ```
+
+   `commit(n) = SHA-256("maze-connect/sas-commit/v1" || len‖n)` — its own
+   context string, so it can never collide with the SAS hash over the same
+   nonce. The responder checks `commit(N_i)` against what it was sent and
+   aborts the link on a mismatch, in constant time.
+
+   Without this round the SAS is worth nothing: a man-in-the-middle running
+   both halves finishes the far side first, fixing that code, then searches
+   its own nonce until the near side's code matches. Six digits is 10^6 —
+   under a second — and then both users see the same number and confirm.
+   The commitment is what stops either side moving its contribution after
+   learning the other's.
 3. Both derive a 6-digit Short Authentication String from
    `SHA-256("maze-connect/sas/v1" || len‖initiatorKey || len‖responderKey ||
    len‖initiatorNonce || len‖responderNonce)`, taking the leading 31 bits

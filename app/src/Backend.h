@@ -146,6 +146,15 @@ public slots:
     /// Re-read every killswitch from the broker.
     void refreshGuard();
 
+    /**
+     * Re-run LAN discovery.
+     *
+     * Discovery is passive, so an empty device list is ambiguous — nothing
+     * out there, or we stopped listening properly? This makes the second
+     * case pressable. See DeviceManager::rescan().
+     */
+    void rescanDevices();
+
     /// Allow or block one device from this window. @p enabled is the
     /// *device's* state — see GuardBridge::setDeviceEnabled(), and note that
     /// getting this backwards once made Block unblock.

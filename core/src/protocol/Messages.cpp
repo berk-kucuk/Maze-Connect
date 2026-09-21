@@ -24,6 +24,7 @@ constexpr TypeEntry kTypes[] = {
     {MessageType::Hello, "hello"},
     {MessageType::PairRequest, "pairRequest"},
     {MessageType::PairResponse, "pairResponse"},
+    {MessageType::PairReveal, "pairReveal"},
     {MessageType::PairResult, "pairResult"},
     {MessageType::Unpair, "unpair"},
     {MessageType::FileOffer, "fileOffer"},
@@ -224,10 +225,17 @@ Message Message::hello(quint64 counter,
     return Message(MessageType::Hello, counter, body);
 }
 
-Message Message::pairRequest(quint64 counter, const QByteArray &nonce) {
+Message Message::pairRequest(quint64 counter, const QByteArray &commitment) {
+    QJsonObject body;
+    body.insert(QLatin1StringView("commitment"),
+                QString::fromLatin1(commitment.toBase64()));
+    return Message(MessageType::PairRequest, counter, body);
+}
+
+Message Message::pairReveal(quint64 counter, const QByteArray &nonce) {
     QJsonObject body;
     body.insert(QLatin1StringView("nonce"), QString::fromLatin1(nonce.toBase64()));
-    return Message(MessageType::PairRequest, counter, body);
+    return Message(MessageType::PairReveal, counter, body);
 }
 
 Message Message::pairResponse(quint64 counter, const QByteArray &nonce) {

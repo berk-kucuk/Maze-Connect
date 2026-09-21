@@ -357,6 +357,11 @@ void Backend::refreshGuard() {
     m_manager.guardBridge()->requestStatus();
 }
 
+void Backend::rescanDevices() {
+    m_manager.rescan();
+    setStatus(tr("Scanning the network\u2026"));
+}
+
 void Backend::setGuardKill(const QString &device, bool enabled) {
     GuardDevice which{};
     // Translated through the same fixed table the link uses. QML is closer to

@@ -61,6 +61,20 @@ public:
     /// Send one announcement immediately (e.g. when the user hits refresh).
     void announceNow();
 
+    /**
+     * Rebind the socket and re-join the group on every interface.
+     *
+     * A multicast membership belongs to the interface it was joined on, and
+     * that set is decided once, at start(). Bring an interface up afterwards
+     * — plug in a cable, connect a VPN, hand the machine a new address — and
+     * the group is simply not joined there. Restarting is the only reliable
+     * fix and it costs nothing.
+     *
+     * Does nothing before the first start(), which has not chosen an
+     * identity to announce yet.
+     */
+    bool refresh();
+
 signals:
     void deviceDiscovered(const DiscoveredDevice &device);
     void deviceLost(const QString &deviceId);

@@ -126,6 +126,18 @@ void Beacon::announceNow() {
     sendAnnounce();
 }
 
+bool Beacon::refresh() {
+    if (m_deviceId.isEmpty()) {
+        return false;
+    }
+    // Copied before start(), which calls stop() and clears them.
+    const QString deviceId = m_deviceId;
+    const QString deviceName = m_deviceName;
+    const QString deviceType = m_deviceType;
+    const quint16 servicePort = m_servicePort;
+    return start(deviceId, deviceName, deviceType, servicePort);
+}
+
 void Beacon::sendAnnounce() {
     if (!m_socket) {
         return;
