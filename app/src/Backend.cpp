@@ -57,11 +57,12 @@ Backend::Backend(QObject *parent) : QObject(parent), m_manager(dataDirectory()) 
             });
 
     connect(&m_manager, &DeviceManager::fileReceived, this,
-            [this](const QString &deviceId, const QString &path) {
+            [this](const QString &deviceId, quint32 transferId, const QString &path) {
                 const QString name = QFileInfo(path).fileName();
-                // The transfer id is not carried on this signal, so finish
-                // whichever incoming transfer matches this filename.
-                m_transfers.finishByFilename(name, path);
+                // By id: the saved name can differ from the offered one when
+                // it was de-duplicated ("photo (1).jpg"), and matching by name
+                // left such rows spinning forever.
+                m_transfers.finished(transferId, path);
                 m_activity.append(ActivityLog::Transfer, tr("Received %1").arg(name),
                                   deviceName(deviceId));
                 setStatus(tr("Received %1").arg(name));
@@ -234,11 +235,30 @@ QString Backend::listenAddress() const {
         return {};
     }
     // Prefer a real LAN address over loopback: this string exists to be
-    // typed into a phone on the same network.
-    for (const QHostAddress &address : QNetworkInterface::allAddresses()) {
-        if (address.protocol() == QAbstractSocket::IPv4Protocol && !address.isLoopback()
-            && !address.isLinkLocal()) {
-            return QStringLiteral("%1:%2").arg(address.toString()).arg(port);
+    // typed into a phone on the same network. A VPN's tunnel address is not
+    // one — it used to be offered first whenever the VPN was up, and a phone
+    // on the Wi-Fi cannot reach 10.x.x.x inside someone's tunnel.
+    static const char *const kVirtual[] = {"tun", "tap", "wg", "ppp", "pvpn", "proton",
+                                           "nordlynx", "vpn", "docker", "veth", "virbr",
+                                           "br-", "vmnet", "tailscale", "zt"};
+    for (const QNetworkInterface &iface : QNetworkInterface::allInterfaces()) {
+        const auto flags = iface.flags();
+        if (!flags.testFlag(QNetworkInterface::IsUp) || flags.testFlag(QNetworkInterface::IsLoopBack)
+            || flags.testFlag(QNetworkInterface::IsPointToPoint)) {
+            continue;
+        }
+        bool virtualIface = false;
+        for (const char *prefix : kVirtual) {
+            virtualIface = virtualIface || iface.name().startsWith(QLatin1StringView(prefix));
+        }
+        if (virtualIface) {
+            continue;
+        }
+        for (const QNetworkAddressEntry &entry : iface.addressEntries()) {
+            const QHostAddress address = entry.ip();
+            if (address.protocol() == QAbstractSocket::IPv4Protocol && !address.isLinkLocal()) {
+                return QStringLiteral("%1:%2").arg(address.toString()).arg(port);
+            }
         }
     }
     return QStringLiteral("127.0.0.1:%1").arg(port);

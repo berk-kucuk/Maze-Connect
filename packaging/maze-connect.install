@@ -87,6 +87,13 @@ post_upgrade() {
     # Re-applied on upgrade because the service definition may have changed
     # (a port added, say) and firewalld holds a copy of the old one.
     _open_ports
+    # A running copy keeps the old code until it is restarted; the tray app
+    # is usually running for days, so an upgrade otherwise looks like it did
+    # nothing (1.2.0: the phone's Media screen waited forever).
+    if pgrep -x maze-connect >/dev/null 2>&1 || pgrep -x mazeconnectd >/dev/null 2>&1; then
+        echo ">> Maze Connect is running the previous version. Quit it from the tray"
+        echo "   and open it again (or: systemctl --user restart mazeconnectd)."
+    fi
 }
 
 post_remove() {

@@ -623,7 +623,9 @@ cd Maze-Connect-Mobile
 
 **İmzalama anahtarı** (git'te değil, `.gitignore`'da):
 `keystore/maze-connect-release.jks` + `keystore.properties`.
-Parola: `lQJVzqAe2e7zkI65I3bcmBcISGsx`
+Parola `keystore.properties` içinde durur ve **hiçbir belgeye yazılmaz** — bu
+depo herkese açık. (Eski bir sürümü parolayı burada düz metin olarak taşıyordu;
+2026-09-25'te kaldırıldı, parola değiştirilmeli.)
 **Yedekleyin** — kaybolursa mevcut kurulumların üzerine güncelleme yapılamaz.
 
 ---

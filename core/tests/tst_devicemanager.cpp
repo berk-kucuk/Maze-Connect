@@ -1,5 +1,7 @@
 #include <QtTest>
 
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QSignalSpy>
 #include <QTemporaryDir>
@@ -33,6 +35,9 @@ private slots:
     void snapshotsAreNotPushedToDevicesThatDidNotAsk();
     void aDroppedLinkDoesNotLeavePendingWorkBehind();
     void aPhoneIsNeverDialledByTheComputer();
+    void aNewerLinkReplacesTheOlderOne();
+    void anUnpairedKeyCannotTakeAPairedDevicesId();
+    void capabilitiesAddedLaterReachOlderPairings();
 
     void cleanup();
 
@@ -462,6 +467,130 @@ void TestDeviceManager::aPhoneIsNeverDialledByTheComputer() {
     // dialled — and an unpaired one is not dialled either way.
     QVERIFY2(!desktop.manager->connectToPairedAt(phone.address, phone.port, phone.deviceId),
              "the computer dialled a device it has not paired with");
+}
+
+void TestDeviceManager::aNewerLinkReplacesTheOlderOne() {
+    // A phone that drops off the Wi-Fi dials again at once, while its old
+    // link is still here waiting out the heartbeat. Answers used to go to the
+    // old, dead link — found first by device id — so the reconnected device
+    // heard nothing until the heartbeat dropped the corpse, and that drop
+    // then cleared the new link's pending requests too.
+    Node a = makeNode(QStringLiteral("alice"));
+    Node b = makeNode(QStringLiteral("bob"));
+    pair(a, b);
+    const QString idA = a.manager->deviceId();
+    const QString idB = b.manager->deviceId();
+
+    // The same device again — same identity, same pins — on a second link.
+    DeviceManager again(a.dir->path());
+    QVERIFY(again.start(QStringLiteral("alice"), QStringLiteral("desktop")));
+    QCOMPARE(again.deviceId(), idA);
+
+    QSignalSpy bLostA(b.manager.get(), &DeviceManager::deviceDisconnected);
+    QVERIFY(again.connectToPairedAt(QHostAddress::LocalHost, b.manager->listenPort(), idB));
+    QTRY_VERIFY_WITH_TIMEOUT(again.isConnected(idB), 5000);
+
+    // The older link is closed from b's side...
+    QTRY_VERIFY_WITH_TIMEOUT(!a.manager->isConnected(idB), 5000);
+    a.manager->stop(); // and stays closed: no reconnect churn for the rest of the test
+    QTest::qWait(200);
+
+    // ...without b ever considering the device gone.
+    QCOMPARE(bLostA.count(), 0);
+    QVERIFY(b.manager->isConnected(idA));
+
+    // And what b asks for now is answered over the new link.
+    installStatusHelper(*a.dir, QStringLiteral("{\"hostname\":\"alicebox\"}"));
+    QSignalSpy report(b.manager.get(), &DeviceManager::statusReportReceived);
+    QVERIFY(b.manager->requestStatus(idA));
+    QTRY_VERIFY_WITH_TIMEOUT(report.count() == 1, 5000);
+    QCOMPARE(qvariant_cast<QJsonObject>(report.at(0).at(1))
+                 .value(QLatin1StringView("hostname")).toString(),
+             QStringLiteral("alicebox"));
+}
+
+void TestDeviceManager::anUnpairedKeyCannotTakeAPairedDevicesId() {
+    // Device ids are public — every beacon carries one. A stranger with its
+    // own key announcing a paired device's id must not stand in for it: not
+    // in the pairing prompt, and not by displacing the real device's link.
+    Node a = makeNode(QStringLiteral("alice"));
+    Node b = makeNode(QStringLiteral("bob"));
+    pair(a, b);
+    const QString idA = a.manager->deviceId();
+    const QString idB = b.manager->deviceId();
+
+    QTemporaryDir malloryDir;
+    QVERIFY(malloryDir.isValid());
+    {
+        QFile id(QDir(malloryDir.path()).filePath(QStringLiteral("device-id")));
+        QVERIFY(id.open(QIODevice::WriteOnly));
+        id.write(idA.toLatin1()); // alice's id, mallory's key
+    }
+    DeviceManager mallory(malloryDir.path());
+    QVERIFY(mallory.start(QStringLiteral("alice"), QStringLiteral("desktop")));
+    QCOMPARE(mallory.deviceId(), idA);
+
+    QSignalSpy bPrompt(b.manager.get(), &DeviceManager::pairingRequested);
+    QSignalSpy bLostA(b.manager.get(), &DeviceManager::deviceDisconnected);
+
+    // While alice is linked: the claim collides with her live link.
+    QVERIFY(mallory.requestPairingAt(QHostAddress::LocalHost, b.manager->listenPort(), idB));
+    QTest::qWait(1500);
+    QCOMPARE(bPrompt.count(), 0);
+    QCOMPARE(bLostA.count(), 0);
+    QVERIFY(b.manager->isConnected(idA));
+
+    // While alice is away: nothing is linked under her id, and the claim
+    // must still fail — on the pin, not on the collision.
+    a.manager->stop();
+    QTRY_VERIFY_WITH_TIMEOUT(!b.manager->isConnected(idA), 5000);
+    QVERIFY(mallory.requestPairingAt(QHostAddress::LocalHost, b.manager->listenPort(), idB));
+    QTest::qWait(1500);
+    QCOMPARE(bPrompt.count(), 0);
+    QCOMPARE(b.manager->pairedDevices().size(), 1);
+}
+
+void TestDeviceManager::capabilitiesAddedLaterReachOlderPairings() {
+    // The enabled set used to be frozen at pairing time, so media control
+    // (1.2.0) stayed off for every device paired before it: the phone's
+    // Media screen waited forever. A capability new to a record is granted;
+    // one the user revoked stays revoked.
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = QDir(dir.path()).filePath(QStringLiteral("devices.json"));
+
+    // A record in the pre-1.2.0 shape: no knownCapabilities, no media.
+    const Identity peer = Identity::generate(QStringLiteral("phone"));
+    QJsonObject record;
+    record.insert(QStringLiteral("deviceId"), QStringLiteral("phone-1"));
+    record.insert(QStringLiteral("deviceName"), QStringLiteral("phone"));
+    record.insert(QStringLiteral("deviceType"), QStringLiteral("mobile"));
+    record.insert(QStringLiteral("publicKey"), QString::fromLatin1(peer.publicKey().toBase64()));
+    record.insert(QStringLiteral("pairedAt"),
+                  QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
+    record.insert(QStringLiteral("enabledCapabilities"),
+                  QJsonArray{QStringLiteral("fileTransfer"), QStringLiteral("systemStatus"),
+                             QStringLiteral("commands"), QStringLiteral("ai"),
+                             QStringLiteral("openOnPhone")}); // guardControl revoked
+    {
+        QFile f(path);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write(QJsonDocument(QJsonArray{record}).toJson());
+    }
+
+    DeviceStore store(path);
+    QVERIFY(store.load());
+    QCOMPARE(store.devices().size(), 1);
+    const Capabilities caps = store.devices().at(0).enabledCapabilities;
+    QVERIFY(caps.testFlag(Capability::Media));          // new: granted
+    QVERIFY(!caps.testFlag(Capability::GuardControl));  // revoked: stays revoked
+
+    // Revoking the new one sticks across a reload.
+    QVERIFY(store.update(peer.publicKey(), QStringLiteral("phone"),
+                         caps & ~Capabilities(Capability::Media)));
+    DeviceStore again(path);
+    QVERIFY(again.load());
+    QVERIFY(!again.devices().at(0).enabledCapabilities.testFlag(Capability::Media));
 }
 
 QTEST_MAIN(TestDeviceManager)

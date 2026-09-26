@@ -64,6 +64,7 @@ void Connection::configureSocket() {
     connect(m_socket, &QSslSocket::disconnected, this, &Connection::onDisconnected);
     connect(m_socket, &QSslSocket::sslErrors, this, &Connection::onSslErrors);
     connect(m_socket, &QAbstractSocket::errorOccurred, this, &Connection::onSocketError);
+    connect(m_socket, &QSslSocket::encryptedBytesWritten, this, [this]() { emit bytesWritten(); });
 
     // A peer must not be able to hold handshake state open indefinitely.
     m_handshakeTimer.setSingleShot(true);
@@ -107,6 +108,10 @@ void Connection::disconnectFromPeer() {
     if (m_socket->state() != QAbstractSocket::UnconnectedState) {
         m_socket->disconnectFromHost();
     }
+}
+
+void Connection::abortLink(const QString &reason) {
+    fail(reason);
 }
 
 QHostAddress Connection::peerAddress() const {
@@ -279,6 +284,10 @@ bool Connection::sendData(quint32 transferId, const QByteArray &chunk) {
         return false;
     }
     return m_socket->write(frame) == frame.size();
+}
+
+qint64 Connection::pendingWriteBytes() const {
+    return m_socket->bytesToWrite() + m_socket->encryptedBytesToWrite();
 }
 
 void Connection::onHandshakeTimeout() {

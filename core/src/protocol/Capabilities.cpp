@@ -15,6 +15,7 @@ constexpr Entry kEntries[] = {
     {Capability::Ai, "ai"},
     {Capability::GuardControl, "guardControl"},
     {Capability::OpenOnPhone, "openOnPhone"},
+    {Capability::Media, "media"},
 };
 
 } // namespace

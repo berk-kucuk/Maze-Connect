@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QDateTime>
+#include <QFile>
 #include <QHash>
 #include <QObject>
 #include <QQueue>
@@ -17,6 +18,7 @@
 #include "mazeconnect/core/CommandRunner.h"
 #include "mazeconnect/core/GuardBridge.h"
 #include "mazeconnect/core/Identity.h"
+#include "mazeconnect/core/MediaBridge.h"
 #include "mazeconnect/core/Server.h"
 #include "mazeconnect/core/StatusProvider.h"
 
@@ -109,6 +111,9 @@ public:
     /// sees the same states a phone does.
     GuardBridge *guardBridge() { return &m_guard; }
     const GuardBridge *guardBridge() const { return &m_guard; }
+
+    /// This machine's media players, as a phone sees them.
+    MediaBridge *mediaBridge() { return &m_media; }
 
     QList<DiscoveredDevice> discoveredDevices() const;
 
@@ -209,7 +214,10 @@ signals:
 
     void fileOffered(const mazeconnect::core::PendingFileOffer &offer);
     void fileProgress(const QString &deviceId, quint32 transferId, qint64 received, qint64 total);
-    void fileReceived(const QString &deviceId, const QString &path);
+    /// Bytes of an outgoing file handed to the socket so far.
+    void fileSendProgress(const QString &deviceId, quint32 transferId, qint64 sent, qint64 total);
+    void fileSent(const QString &deviceId, quint32 transferId);
+    void fileReceived(const QString &deviceId, quint32 transferId, const QString &path);
     void fileFailed(const QString &deviceId, quint32 transferId, const QString &reason);
 
     /**
@@ -294,6 +302,23 @@ private:
 
     void deliverGuardReport(const QMap<GuardDevice, GuardState> &states, const QString &error);
 
+    /// Send the players to everyone who asked and everyone subscribed.
+    void deliverMediaState();
+    void sendMediaState(Connection *connection, const QString &notice);
+    /// At most a handful of media commands per device per second: a held
+    /// volume slider must not become a process spawn per touch event.
+    bool allowMediaCommand(const QString &deviceId);
+
+    /// Move an outgoing file forward as far as the socket's buffer allows.
+    void pumpOutgoing(quint32 transferId);
+
+    /// Retire an older link to the same device when a new one is
+    /// established — see wireConnection().
+    void retireOlderLinks(const std::shared_ptr<Link> &current);
+
+    /// Fail every transfer, in either direction, with @p deviceId.
+    void abandonTransfers(const QString &deviceId, const QString &reason);
+
     void sendHello(Connection *connection);
     void finalizePairing(const std::shared_ptr<Link> &link);
 
@@ -332,6 +357,21 @@ private:
     CommandRunner m_commands;
     AiBridge m_ai;
     GuardBridge m_guard;
+    MediaBridge m_media;
+
+    /// Devices that asked for the players and have not had an answer yet.
+    QSet<QString> m_mediaWaiting;
+    /// Devices that want every change pushed, until they say otherwise or
+    /// their link drops.
+    QSet<QString> m_mediaSubscribers;
+    /// Hash of the last state pushed to each subscriber, so an unchanged
+    /// state is not sent again.
+    QHash<QString, QByteArray> m_lastMediaSent;
+    struct RateWindow {
+        qint64 startedMs = 0;
+        int count = 0;
+    };
+    QHash<QString, RateWindow> m_mediaCommandRate;
 
     /// Devices whose statusRequest has not been answered yet.
     QSet<QString> m_statusRequesters;
@@ -402,8 +442,20 @@ private:
     QSet<QString> m_outboundPending;
     QTimer m_reconnectTimer;
 
-    /// Outgoing transfers still streaming, keyed by transfer id.
-    QHash<quint32, QString> m_outgoingTransfers;
+    /**
+     * Outgoing files, keyed by transfer id, **with the device they were
+     * offered to.** The id alone used to be the key, and ids are small
+     * sequential numbers: any other paired device could send fileAccept for
+     * a transfer meant for someone else and have the file streamed to itself.
+     */
+    struct OutgoingTransfer {
+        QString deviceId;
+        QString path;
+        std::shared_ptr<QFile> file; ///< open once accepted
+        qint64 sent = 0;
+        qint64 size = 0;
+    };
+    QHash<quint32, OutgoingTransfer> m_outgoingTransfers;
     quint32 m_nextTransferId = 1;
 };
 

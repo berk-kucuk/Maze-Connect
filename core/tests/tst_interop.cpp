@@ -6,6 +6,7 @@
 #include "mazeconnect/core/Framing.h"
 #include "mazeconnect/core/GuardBridge.h"
 #include "mazeconnect/core/Messages.h"
+#include "mazeconnect/core/MediaBridge.h"
 #include "mazeconnect/core/Sas.h"
 
 using namespace mazeconnect::core;
@@ -39,6 +40,7 @@ private slots:
     void commandMessageShape();
     void aiMessageShape();
     void guardMessageShape();
+    void mediaMessageShape();
 };
 
 void TestInterop::frameHeaderLayout() {
@@ -400,6 +402,49 @@ void TestInterop::guardMessageShape() {
             .object();
     QCOMPARE(result.value(QLatin1StringView("state")).toString(), QStringLiteral("off"));
     QVERIFY(!result.contains(QLatin1StringView("error")));
+}
+
+void TestInterop::mediaMessageShape() {
+    // Duplicated in InteropTest.mediaMessageShape.
+    QCOMPARE(capabilityName(Capability::Media), QStringLiteral("media"));
+    QCOMPARE(capabilityFromName(QStringLiteral("media")), Capability::Media);
+    QVERIFY(supportedCapabilities().testFlag(Capability::Media));
+
+    QCOMPARE(Message::typeName(MessageType::MediaRequest), QStringLiteral("mediaRequest"));
+    QCOMPARE(Message::typeName(MessageType::MediaState), QStringLiteral("mediaState"));
+    QCOMPARE(Message::typeName(MessageType::MediaCommand), QStringLiteral("mediaCommand"));
+
+    const QJsonObject request =
+        QJsonDocument::fromJson(Message::mediaRequest(1, true).toJson()).object();
+    QCOMPARE(request.value(QLatin1StringView("subscribe")).toBool(), true);
+
+    const QJsonObject command = QJsonDocument::fromJson(
+        Message::mediaCommand(2, QStringLiteral("spotify"), QStringLiteral("seek"), 61000).toJson())
+                                    .object();
+    QCOMPARE(command.value(QLatin1StringView("player")).toString(), QStringLiteral("spotify"));
+    QCOMPARE(command.value(QLatin1StringView("action")).toString(), QStringLiteral("seek"));
+    QCOMPARE(command.value(QLatin1StringView("value")).toInteger(), qint64(61000));
+
+    // The state is nested whole under "media", like the status snapshot.
+    QJsonObject media;
+    media.insert(QLatin1StringView("active"), QStringLiteral("spotify"));
+    const QJsonObject state =
+        QJsonDocument::fromJson(Message::mediaState(3, media).toJson()).object();
+    QCOMPARE(state.value(QLatin1StringView("media")).toObject()
+                 .value(QLatin1StringView("active")).toString(),
+             QStringLiteral("spotify"));
+
+    // The action vocabulary is pinned too: the phone sends these names.
+    const QStringList names = {QStringLiteral("play"), QStringLiteral("pause"),
+                               QStringLiteral("playPause"), QStringLiteral("next"),
+                               QStringLiteral("previous"), QStringLiteral("stop"),
+                               QStringLiteral("seek"), QStringLiteral("setVolume"),
+                               QStringLiteral("systemVolume"), QStringLiteral("systemMute")};
+    for (const QString &name : names) {
+        MediaAction action{};
+        QVERIFY2(mediaActionFromName(name, action), qPrintable(name));
+        QCOMPARE(mediaActionName(action), name);
+    }
 }
 
 QTEST_MAIN(TestInterop)

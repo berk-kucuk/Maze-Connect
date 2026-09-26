@@ -56,6 +56,7 @@ bool DeviceStore::load() {
         return false;
     }
 
+    bool migrated = false;
     for (const QJsonValue &value : doc.array()) {
         if (!value.isObject()) {
             continue;
@@ -79,11 +80,36 @@ bool DeviceStore::load() {
         }
         device.enabledCapabilities = capabilitiesFromNames(capNames);
 
+        // Capabilities this build has that the record has never heard of are
+        // granted, like everything else is at pairing. The enabled set used
+        // to be frozen at pairing time, so a feature added later — media
+        // control, in 1.2.0 — was switched off for every device paired
+        // before it, with nothing anywhere saying so. The record now lists
+        // what it knew about, which keeps a capability the user revoked
+        // revoked: only ones that are *new to the record* are added.
+        Capabilities known = legacyKnownCapabilities();
+        const QJsonValue knownValue = obj.value(QLatin1StringView("knownCapabilities"));
+        if (knownValue.isArray()) {
+            QStringList knownNames;
+            for (const QJsonValue &c : knownValue.toArray()) {
+                knownNames << c.toString();
+            }
+            known = capabilitiesFromNames(knownNames);
+        }
+        const Capabilities added = supportedCapabilities() & ~known;
+        if (added) {
+            device.enabledCapabilities |= added;
+            migrated = true;
+        }
+
         // A record we cannot fully validate is dropped rather than loaded
         // half-trusted — a truncated key must never become a pin.
         if (device.isValid()) {
             m_devices.append(device);
         }
+    }
+    if (migrated) {
+        save(); // so the grant is recorded, and a later revocation sticks
     }
     return true;
 }
@@ -105,6 +131,8 @@ bool DeviceStore::save() const {
         obj.insert(QLatin1StringView("pairedAt"), device.pairedAt.toString(Qt::ISODate));
         obj.insert(QLatin1StringView("enabledCapabilities"),
                    QJsonArray::fromStringList(capabilitiesToNames(device.enabledCapabilities)));
+        obj.insert(QLatin1StringView("knownCapabilities"),
+                   QJsonArray::fromStringList(capabilitiesToNames(supportedCapabilities())));
         array.append(obj);
     }
 

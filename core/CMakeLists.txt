@@ -1,4 +1,4 @@
-find_package(Qt6 REQUIRED COMPONENTS Core Network)
+find_package(Qt6 REQUIRED COMPONENTS Core Network DBus)
 find_package(OpenSSL REQUIRED)
 
 # Headers are listed alongside the sources so AUTOMOC picks up the Q_OBJECT
@@ -18,6 +18,7 @@ add_library(mazeconnect-core
     src/plugins/AiBridge.cpp
     src/plugins/CommandRunner.cpp
     src/plugins/GuardBridge.cpp
+    src/plugins/MediaBridge.cpp
     src/plugins/StatusProvider.cpp
     src/storage/DeviceStore.cpp
     src/discovery/Beacon.cpp
@@ -38,6 +39,7 @@ add_library(mazeconnect-core
     include/mazeconnect/core/AiBridge.h
     include/mazeconnect/core/CommandRunner.h
     include/mazeconnect/core/GuardBridge.h
+    include/mazeconnect/core/MediaBridge.h
     include/mazeconnect/core/StatusProvider.h
     include/mazeconnect/core/DeviceStore.h
     include/mazeconnect/core/Beacon.h
@@ -54,6 +56,7 @@ target_link_libraries(mazeconnect-core
     PUBLIC
         Qt6::Core
         Qt6::Network
+        Qt6::DBus
     PRIVATE
         OpenSSL::Crypto
 )

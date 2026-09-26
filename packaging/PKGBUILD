@@ -1,8 +1,8 @@
 # Maintainer: Berk Küçük <dev.berkkucukk@gmail.com>
 
 pkgname=maze-connect
-pkgver=1.1.0
-pkgrel=1
+pkgver=1.2.0
+pkgrel=2
 pkgdesc="Maze Linux device-link app — pair your phone over the LAN with verified, pinned mutual TLS"
 arch=('x86_64' 'aarch64')
 url="https://github.com/berk-kucuk/Maze-Connect"
@@ -13,8 +13,11 @@ depends=(
     'kwindowsystem'
     'openssl'
 )
-optdepends=('maze-tools: system dashboard — without it the dashboard says so and nothing else changes')
+optdepends=('maze-tools: system dashboard — without it the dashboard says so and nothing else changes'
+            'wireplumber: lets the phone set the computer volume (wpctl) — media players work without it')
 makedepends=('cmake' 'ninja')
+# check() runs the media bridge against a private bus of its own.
+checkdepends=('dbus')
 # Opens TCP+UDP 38271 in the default zone on install, and closes them again
 # on removal. Without it the app links only on machines with no firewall,
 # and fails silently everywhere else.

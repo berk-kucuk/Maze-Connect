@@ -51,6 +51,9 @@ constexpr TypeEntry kTypes[] = {
     {MessageType::Ping, "ping"},
     {MessageType::Pong, "pong"},
     {MessageType::OpenOnPhone, "openOnPhone"},
+    {MessageType::MediaRequest, "mediaRequest"},
+    {MessageType::MediaState, "mediaState"},
+    {MessageType::MediaCommand, "mediaCommand"},
 };
 
 bool hasControlCharacters(const QString &s) {
@@ -432,6 +435,27 @@ Message Message::openOnPhone(quint64 counter, const QString &text) {
     QJsonObject body;
     body.insert(QLatin1StringView("text"), text);
     return Message(MessageType::OpenOnPhone, counter, body);
+}
+
+Message Message::mediaRequest(quint64 counter, bool subscribe) {
+    QJsonObject body;
+    body.insert(QLatin1StringView("subscribe"), subscribe);
+    return Message(MessageType::MediaRequest, counter, body);
+}
+
+Message Message::mediaState(quint64 counter, const QJsonObject &media) {
+    QJsonObject body;
+    body.insert(QLatin1StringView("media"), media);
+    return Message(MessageType::MediaState, counter, body);
+}
+
+Message Message::mediaCommand(quint64 counter, const QString &player, const QString &action,
+                              qint64 value) {
+    QJsonObject body;
+    body.insert(QLatin1StringView("player"), player);
+    body.insert(QLatin1StringView("action"), action);
+    body.insert(QLatin1StringView("value"), value);
+    return Message(MessageType::MediaCommand, counter, body);
 }
 
 // ---- Data chunk framing -------------------------------------------------

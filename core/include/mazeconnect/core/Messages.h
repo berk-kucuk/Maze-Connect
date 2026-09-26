@@ -43,6 +43,9 @@ enum class MessageType {
     Ping,           ///< transport-level liveness probe; Connection answers it directly
     Pong,           ///< reply to Ping; Connection consumes it directly
     OpenOnPhone,    ///< computer -> phone only: clipboard text to open there
+    MediaRequest,   ///< phone -> computer: send the players now, and (un)subscribe
+    MediaState,     ///< computer -> phone: the players, their track and position
+    MediaCommand,   ///< phone -> computer: one action from a fixed table
 };
 
 /**
@@ -238,6 +241,35 @@ public:
     /// Clipboard text pushed to a phone to open. Computer -> phone only;
     /// the phone has no way to send this back.
     static Message openOnPhone(quint64 counter, const QString &text);
+
+    /**
+     * Ask for the computer's media players.
+     *
+     * Always answered with one mediaState. With @p subscribe true the
+     * computer also pushes a fresh one whenever a player changes, until a
+     * request with false arrives or the link drops — a phone showing
+     * now-playing controls must not have to poll for a track change.
+     */
+    static Message mediaRequest(quint64 counter, bool subscribe);
+
+    /**
+     * The players, nested under "media" like the status snapshot, for the
+     * same reason: display data produced here, whose fields must not be able
+     * to collide with the envelope. The phone validates every field it shows.
+     */
+    static Message mediaState(quint64 counter, const QJsonObject &media);
+
+    /**
+     * One action on one player.
+     *
+     * @p action is a name from a fixed table (see MediaBridge) and @p player
+     * an id the computer itself handed out in mediaState. Neither is ever
+     * turned into a bus name, a method name or an argv by string building on
+     * the receiving side: both are looked up, and anything not found is
+     * refused.
+     */
+    static Message mediaCommand(quint64 counter, const QString &player, const QString &action,
+                                qint64 value);
 
     static QString typeName(MessageType type);
     static MessageType typeFromName(const QString &name);

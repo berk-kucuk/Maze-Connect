@@ -19,6 +19,7 @@ enum class Capability : quint32 {
     Ai = 0x08,           ///< chat with Maze AI through the local Ollama
     GuardControl = 0x10, ///< toggle maze-guard killswitches (privileged)
     OpenOnPhone = 0x20,  ///< push the desktop's clipboard to the phone to open
+    Media = 0x40,        ///< see and control this computer's media players
 };
 Q_DECLARE_FLAGS(Capabilities, Capability)
 Q_DECLARE_OPERATORS_FOR_FLAGS(Capabilities)
@@ -34,7 +35,7 @@ Q_DECLARE_OPERATORS_FOR_FLAGS(Capabilities)
 inline constexpr Capabilities supportedCapabilities() {
     return Capabilities(Capability::FileTransfer) | Capability::SystemStatus
         | Capability::Commands | Capability::Ai | Capability::GuardControl
-        | Capability::OpenOnPhone;
+        | Capability::OpenOnPhone | Capability::Media;
 }
 
 /**
@@ -62,6 +63,17 @@ inline constexpr Capabilities supportedCapabilities() {
  */
 inline constexpr Capabilities defaultEnabledCapabilities() {
     return supportedCapabilities();
+}
+
+/**
+ * Every capability that existed before a pairing record started saying which
+ * capabilities it knew about (desktop 1.2.0). Used only to read such older
+ * records — see DeviceStore::load().
+ */
+inline constexpr Capabilities legacyKnownCapabilities() {
+    return Capabilities(Capability::FileTransfer) | Capability::SystemStatus
+        | Capability::Commands | Capability::Ai | Capability::GuardControl
+        | Capability::OpenOnPhone;
 }
 
 /// Wire names. Unknown names from a peer are ignored, never guessed at.

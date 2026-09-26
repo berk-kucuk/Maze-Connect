@@ -77,6 +77,11 @@ public:
     void startServerHandshake();
     void disconnectFromPeer();
 
+    /// Drop the link at once, without waiting for queued bytes. For a link
+    /// that is being replaced: its peer may be gone, and a graceful close to
+    /// a peer that never acknowledges holds the socket for minutes.
+    void abortLink(const QString &reason);
+
     State state() const { return m_state; }
     Mode mode() const { return m_mode; }
 
@@ -92,6 +97,11 @@ public:
     bool send(const Message &message);
     bool sendData(quint32 transferId, const QByteArray &chunk);
 
+    /// Bytes accepted by send()/sendData() that have not reached the wire
+    /// yet. A sender streaming a file keeps this small instead of queueing
+    /// the whole file in memory.
+    qint64 pendingWriteBytes() const;
+
     /// Next counter to use for an outgoing message.
     quint64 nextCounter() { return ++m_outgoingCounter; }
 
@@ -99,6 +109,8 @@ signals:
     void established();
     void messageReceived(const mazeconnect::core::Message &message);
     void dataReceived(quint32 transferId, const QByteArray &chunk);
+    /// Some queued bytes reached the wire; pendingWriteBytes() went down.
+    void bytesWritten();
     void disconnected();
     /// Fatal protocol/trust failure; the connection is already closing.
     void failed(const QString &reason);

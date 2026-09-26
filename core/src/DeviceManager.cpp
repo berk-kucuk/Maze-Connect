@@ -6,6 +6,7 @@
 #include "mazeconnect/core/Version.h"
 
 #include <QCryptographicHash>
+#include <QElapsedTimer>
 #include <QNetworkInterface>
 #include <QDir>
 #include <QFile>
@@ -36,6 +37,16 @@ constexpr QLatin1StringView kInboxDir("inbox");
 /// Chunk size for outgoing files — comfortably under the data-frame cap
 /// once the 4-byte transfer id is added.
 constexpr qint64 kSendChunkSize = 128 * 1024;
+
+/// How much of an outgoing file may sit in the socket's buffer at once. The
+/// sender used to read the whole file into it in one loop — a 2 GB file was
+/// 2 GB of memory and a frozen event loop, heartbeats included, until the
+/// last byte was queued.
+constexpr qint64 kSendHighWater = 1024 * 1024;
+
+/// Media commands one device may send per second. A volume slider being
+/// dragged sends a stream of them; each one is a process spawn or a bus call.
+constexpr int kMediaCommandsPerSecond = 8;
 
 constexpr int kReconnectIntervalMs = 10000;
 
@@ -132,6 +143,10 @@ DeviceManager::DeviceManager(QString dataDir, QObject *parent)
                 connection->send(Message::guardResult(connection->nextCounter(), name,
                                                       guardStateName(state), error));
             });
+
+    // Every player change goes to whoever is subscribed; a request's answer
+    // rides on the same signal once the fresh read is in.
+    connect(&m_media, &MediaBridge::changed, this, &DeviceManager::deliverMediaState);
 
     connect(&m_commands, &CommandRunner::finished, this,
             [this](quint32 requestId, const QString &id, int exitCode, const QString &output,
@@ -480,12 +495,71 @@ void DeviceManager::wireConnection(Connection *connection) {
             [this, connection]() { dropConnection(connection, QString()); });
     connect(connection, &Connection::failed, this,
             [this, connection](const QString &reason) { dropConnection(connection, reason); });
+    connect(connection, &Connection::bytesWritten, this, [this, connection]() {
+        const auto drained = linkFor(connection);
+        if (!drained) {
+            return;
+        }
+        QList<quint32> ids;
+        for (auto it = m_outgoingTransfers.cbegin(); it != m_outgoingTransfers.cend(); ++it) {
+            if (it->deviceId == drained->deviceId && it->file) {
+                ids.append(it.key());
+            }
+        }
+        for (const quint32 id : ids) {
+            pumpOutgoing(id);
+        }
+    });
+
+    if (link->trusted && !link->deviceId.isEmpty()) {
+        retireOlderLinks(link);
+    }
 
     sendHello(connection);
 
     if (link->trusted && !link->deviceId.isEmpty()) {
         emit deviceConnected(link->deviceId);
         emit deviceListChanged();
+    }
+}
+
+/**
+ * Newest link wins.
+ *
+ * A phone that drops off the Wi-Fi and comes back dials again at once, while
+ * the link it had is still here — half-open, waiting out the 45-second
+ * heartbeat. Both used to stay in m_links, and every lookup by device id found
+ * the *old* one first: status reports, command results and AI replies were
+ * all written into a dead socket, and the reconnected phone sat on "asking…"
+ * until the heartbeat finally dropped the corpse. Worse, that drop then ran
+ * forgetPendingWork() for the device id, clearing the requests the *new* link
+ * had just made.
+ *
+ * The older link is detached first — its handlers removed, so its eventual
+ * end is not mistaken for this device leaving — and then aborted. Transfers
+ * streaming over it cannot continue on the new link (the far side keys them
+ * to the connection they began on), so they are failed rather than resumed
+ * mid-file.
+ */
+void DeviceManager::retireOlderLinks(const std::shared_ptr<Link> &current) {
+    bool retired = false;
+    for (qsizetype i = m_links.size() - 1; i >= 0; --i) {
+        const auto other = m_links[i];
+        if (other == current || other->deviceId != current->deviceId) {
+            continue;
+        }
+        m_links.removeAt(i);
+        Connection *old = other->connection;
+        qCInfo(lcLink) << "replacing an older link to" << current->deviceId;
+        disconnect(old, nullptr, this, nullptr);
+        old->abortLink(QStringLiteral("replaced by a newer link"));
+        if (old->parent() == this) {
+            old->deleteLater();
+        }
+        retired = true;
+    }
+    if (retired) {
+        abandonTransfers(current->deviceId, tr("the connection was re-established"));
     }
 }
 
@@ -500,6 +574,13 @@ void DeviceManager::dropConnection(Connection *connection, const QString &reason
         const QString deviceId = m_links[i]->deviceId;
         const bool wasTrusted = m_links[i]->trusted;
         m_links.removeAt(i);
+
+        // Another link to the same device still up means the device has not
+        // gone anywhere; its pending work belongs to that link now.
+        if (!deviceId.isEmpty() && linkForDevice(deviceId) != nullptr) {
+            emit deviceListChanged();
+            break;
+        }
 
         forgetPendingWork(deviceId);
 
@@ -551,6 +632,19 @@ void DeviceManager::forgetPendingWork(const QString &deviceId) {
     m_aiModelRequesters.remove(deviceId);
     m_guardStatusRequesters.remove(deviceId);
 
+    m_mediaWaiting.remove(deviceId);
+    m_mediaSubscribers.remove(deviceId);
+    m_lastMediaSent.remove(deviceId);
+    m_mediaCommandRate.remove(deviceId);
+    m_media.setWatching(!m_mediaSubscribers.isEmpty());
+
+    // A half-received file cannot be finished over a link that is gone. Left
+    // in place its .part file stayed in the inbox until the app quit, and it
+    // kept counting against the receiver's concurrency limit: after eight
+    // interrupted transfers every further offer was refused as "too many
+    // concurrent transfers" until a restart.
+    abandonTransfers(deviceId, tr("the device disconnected"));
+
     // The privileged one matters most. m_guardRequester is a single slot, and
     // a device that vanished mid-toggle would hold it forever — after which
     // *every* killswitch request from *any* device is refused with "another
@@ -567,6 +661,34 @@ void DeviceManager::forgetPendingWork(const QString &deviceId) {
     }
     for (auto it = m_aiRequests.begin(); it != m_aiRequests.end();) {
         it = it->deviceId == deviceId ? m_aiRequests.erase(it) : std::next(it);
+    }
+}
+
+void DeviceManager::abandonTransfers(const QString &deviceId, const QString &reason) {
+    QList<quint32> failedIds;
+    for (auto it = m_outgoingTransfers.begin(); it != m_outgoingTransfers.end();) {
+        if (it->deviceId != deviceId) {
+            ++it;
+            continue;
+        }
+        if (it->file) {
+            failedIds.append(it.key());
+        }
+        it = m_outgoingTransfers.erase(it);
+    }
+    for (auto it = m_pendingOffers.begin(); it != m_pendingOffers.end();) {
+        if (it->deviceId != deviceId) {
+            ++it;
+            continue;
+        }
+        if (m_receiver) {
+            m_receiver->cancel(it.key());
+        }
+        failedIds.append(it.key());
+        it = m_pendingOffers.erase(it);
+    }
+    for (const quint32 id : failedIds) {
+        emit fileFailed(deviceId, id, reason);
     }
 }
 
@@ -685,6 +807,24 @@ void DeviceManager::handleMessage(Connection *connection, const Message &message
                 return;
             }
         } else {
+            // An unpaired key may not take the name of a device that is paired
+            // or already linked. Device ids are not secret — every beacon
+            // carries one — and every per-device lookup here goes by id, so a
+            // stranger announcing a paired phone's id could stand in for it:
+            // its link found first, its disconnect clearing the real phone's
+            // pending work, its pairing prompt carrying a trusted name.
+            if (m_store.deviceForId(deviceId).isValid()) {
+                dropConnection(connection,
+                               QStringLiteral("unpaired key claims a paired device's id"));
+                return;
+            }
+            for (const auto &other : m_links) {
+                if (other != link && other->deviceId == deviceId) {
+                    dropConnection(connection,
+                                   QStringLiteral("another link already uses that device id"));
+                    return;
+                }
+            }
             link->deviceId = deviceId;
         }
         link->deviceName = deviceName;
@@ -882,30 +1022,25 @@ void DeviceManager::handleMessage(Connection *connection, const Message &message
             break;
         }
         const auto transferId = static_cast<quint32>(rawId);
-        const QString path = m_outgoingTransfers.value(transferId);
-        if (path.isEmpty()) {
+        auto it = m_outgoingTransfers.find(transferId);
+        // Only a file we offered to *this* device, and only once.
+        if (it == m_outgoingTransfers.end() || it->deviceId != link->deviceId || it->file) {
             break;
         }
 
-        QFile file(path);
-        if (!file.open(QIODevice::ReadOnly)) {
+        auto file = std::make_shared<QFile>(it->path);
+        if (!file->open(QIODevice::ReadOnly)) {
             Message cancel = Message::fileCancel(connection->nextCounter(), transferId,
                                                  QStringLiteral("cannot read source file"));
             connection->send(cancel);
-            m_outgoingTransfers.remove(transferId);
+            m_outgoingTransfers.erase(it);
+            emit fileFailed(link->deviceId, transferId, tr("cannot read the file"));
             break;
         }
-        while (!file.atEnd()) {
-            const QByteArray chunk = file.read(kSendChunkSize);
-            if (chunk.isEmpty() || !connection->sendData(transferId, chunk)) {
-                break;
-            }
-        }
-        file.close();
-
-        Message complete = Message::fileComplete(connection->nextCounter(), transferId);
-        connection->send(complete);
-        m_outgoingTransfers.remove(transferId);
+        it->file = file;
+        it->size = file->size();
+        it->sent = 0;
+        pumpOutgoing(transferId);
         break;
     }
 
@@ -916,11 +1051,24 @@ void DeviceManager::handleMessage(Connection *connection, const Message &message
             break;
         }
         const auto transferId = static_cast<quint32>(rawId);
-        m_outgoingTransfers.remove(transferId);
-        m_receiver->cancel(transferId);
-        m_pendingOffers.remove(transferId);
-        emit fileFailed(link->deviceId, transferId,
-                        message.string(QLatin1StringView("reason"), 256));
+        // Either direction, but only this device's own transfer: ids are
+        // small numbers, and one device must not be able to cancel another's.
+        bool matched = false;
+        const auto out = m_outgoingTransfers.find(transferId);
+        if (out != m_outgoingTransfers.end() && out->deviceId == link->deviceId) {
+            m_outgoingTransfers.erase(out);
+            matched = true;
+        }
+        const auto in = m_pendingOffers.find(transferId);
+        if (in != m_pendingOffers.end() && in->deviceId == link->deviceId) {
+            m_receiver->cancel(transferId);
+            m_pendingOffers.erase(in);
+            matched = true;
+        }
+        if (matched) {
+            emit fileFailed(link->deviceId, transferId,
+                            message.string(QLatin1StringView("reason"), 256));
+        }
         break;
     }
 
@@ -933,11 +1081,14 @@ void DeviceManager::handleMessage(Connection *connection, const Message &message
             break;
         }
         const auto transferId = static_cast<quint32>(rawId);
+        if (m_pendingOffers.value(transferId).deviceId != link->deviceId) {
+            break; // not a transfer this device is sending us
+        }
 
         QString finalPath;
         QString reason;
         if (m_receiver->finish(transferId, finalPath, reason)) {
-            emit fileReceived(link->deviceId, finalPath);
+            emit fileReceived(link->deviceId, transferId, finalPath);
         } else {
             emit fileFailed(link->deviceId, transferId, reason);
         }
@@ -1151,6 +1302,64 @@ void DeviceManager::handleMessage(Connection *connection, const Message &message
         break;
     }
 
+    case MessageType::MediaRequest: {
+        if (!capabilityAllowed(*link, Capability::Media)) {
+            QJsonObject media;
+            media.insert(QLatin1StringView("error"),
+                         QStringLiteral("this computer has that switched off for your device"));
+            connection->send(Message::mediaState(connection->nextCounter(), media));
+            break;
+        }
+        if (message.boolean(QLatin1StringView("subscribe"))) {
+            m_mediaSubscribers.insert(link->deviceId);
+        } else {
+            m_mediaSubscribers.remove(link->deviceId);
+        }
+        m_lastMediaSent.remove(link->deviceId);
+        if (!m_media.ensureStarted()) {
+            sendMediaState(connection, QString());
+            break;
+        }
+        m_mediaWaiting.insert(link->deviceId);
+        m_media.setWatching(!m_mediaSubscribers.isEmpty());
+        // Read fresh before answering, so the position is current. The answer
+        // goes out from deliverMediaState() when the read is in.
+        m_media.refresh();
+        break;
+    }
+
+    case MessageType::MediaCommand: {
+        if (!capabilityAllowed(*link, Capability::Media)) {
+            QJsonObject media;
+            media.insert(QLatin1StringView("error"),
+                         QStringLiteral("this computer has that switched off for your device"));
+            connection->send(Message::mediaState(connection->nextCounter(), media));
+            break;
+        }
+        if (!allowMediaCommand(link->deviceId)) {
+            break; // a flood gets no answer, and no action
+        }
+        // Both strings are only ever looked up: the action in a fixed table,
+        // the player among the ones MediaBridge itself found. Neither is
+        // turned into a bus name, a method or an argument by concatenation.
+        const QString actionName = message.string(QLatin1StringView("action"), 16);
+        const QString player = message.string(QLatin1StringView("player"),
+                                              MediaBridge::kMaxIdChars);
+        const qint64 value = message.integer(QLatin1StringView("value"), 24LL * 3600 * 1000, -1);
+        MediaAction action{};
+        QString error;
+        if (!mediaActionFromName(actionName, action)) {
+            error = QStringLiteral("unknown media action");
+        } else if (m_media.command(player, action, value, error)) {
+            error.clear();
+        }
+        if (!error.isEmpty()) {
+            sendMediaState(connection, error);
+        }
+        break;
+    }
+
+    case MessageType::MediaState:
     case MessageType::GuardReport:
     case MessageType::GuardResult:
     case MessageType::OpenOnPhone:
@@ -1278,7 +1487,8 @@ void DeviceManager::handleData(Connection *connection, quint32 transferId,
         dropConnection(connection, QStringLiteral("data frame without file-transfer capability"));
         return;
     }
-    if (!m_receiver->hasTransfer(transferId)) {
+    if (!m_receiver->hasTransfer(transferId)
+        || m_pendingOffers.value(transferId).deviceId != link->deviceId) {
         // Data for a transfer the user never accepted: refuse rather than
         // start writing on the strength of the data frame alone.
         dropConnection(connection, QStringLiteral("data for an unaccepted transfer"));
@@ -1462,11 +1672,129 @@ bool DeviceManager::sendFile(const QString &deviceId, const QString &localPath) 
     }
 
     const quint32 transferId = m_nextTransferId++;
-    m_outgoingTransfers.insert(transferId, localPath);
+    OutgoingTransfer transfer;
+    transfer.deviceId = deviceId;
+    transfer.path = localPath;
+    transfer.size = info.size();
+    m_outgoingTransfers.insert(transferId, transfer);
 
     Message offer = Message::fileOffer(link->connection->nextCounter(), transferId,
                                        info.fileName(), info.size());
     return link->connection->send(offer);
+}
+
+void DeviceManager::pumpOutgoing(quint32 transferId) {
+    auto it = m_outgoingTransfers.find(transferId);
+    if (it == m_outgoingTransfers.end() || !it->file) {
+        return;
+    }
+    const QString deviceId = it->deviceId;
+    Connection *connection = connectionForDevice(deviceId);
+    const auto link = connection ? linkFor(connection) : nullptr;
+    if (!link || !capabilityAllowed(*link, Capability::FileTransfer)) {
+        m_outgoingTransfers.erase(it);
+        emit fileFailed(deviceId, transferId, tr("the device is no longer allowed to receive files"));
+        return;
+    }
+
+    // Top the socket's buffer up to the high-water mark and stop. The rest
+    // follows from Connection::bytesWritten as the buffer drains, so memory
+    // stays at about a megabyte whatever the file size, and the event loop —
+    // heartbeats, other devices, the window — keeps running in between.
+    while (connection->pendingWriteBytes() < kSendHighWater) {
+        const QByteArray chunk = it->file->read(kSendChunkSize);
+        if (chunk.isEmpty()) {
+            const bool complete = it->file->atEnd() && it->sent == it->size;
+            const qint64 size = it->size;
+            m_outgoingTransfers.erase(it);
+            if (complete) {
+                connection->send(Message::fileComplete(connection->nextCounter(), transferId));
+                emit fileSendProgress(deviceId, transferId, size, size);
+                emit fileSent(deviceId, transferId);
+            } else {
+                // Shorter or longer than when it was offered: the far side
+                // counts bytes against the offer and would reject it anyway.
+                connection->send(Message::fileCancel(connection->nextCounter(), transferId,
+                                                     QStringLiteral("the file changed while sending")));
+                emit fileFailed(deviceId, transferId, tr("the file changed while it was being sent"));
+            }
+            return;
+        }
+        if (it->sent + chunk.size() > it->size || !connection->sendData(transferId, chunk)) {
+            m_outgoingTransfers.erase(it);
+            connection->send(Message::fileCancel(connection->nextCounter(), transferId,
+                                                 QStringLiteral("could not send the file")));
+            emit fileFailed(deviceId, transferId, tr("could not send the file"));
+            return;
+        }
+        it->sent += chunk.size();
+    }
+    emit fileSendProgress(deviceId, transferId, it->sent, it->size);
+}
+
+// ---- media -------------------------------------------------------------
+
+bool DeviceManager::allowMediaCommand(const QString &deviceId) {
+    static QElapsedTimer clock;
+    if (!clock.isValid()) {
+        clock.start();
+    }
+    const qint64 now = clock.elapsed();
+    RateWindow &window = m_mediaCommandRate[deviceId];
+    if (now - window.startedMs >= 1000) {
+        window.startedMs = now;
+        window.count = 0;
+    }
+    return ++window.count <= kMediaCommandsPerSecond;
+}
+
+void DeviceManager::sendMediaState(Connection *connection, const QString &notice) {
+    QJsonObject media;
+    if (m_media.isAvailable()) {
+        media = m_media.snapshot();
+    } else {
+        const QString reason = m_media.unavailableReason();
+        media.insert(QLatin1StringView("error"),
+                     reason.isEmpty() ? tr("media players cannot be reached") : reason);
+    }
+    if (!notice.isEmpty()) {
+        media.insert(QLatin1StringView("notice"), notice.left(200));
+    }
+    connection->send(Message::mediaState(connection->nextCounter(), media));
+}
+
+void DeviceManager::deliverMediaState() {
+    const QSet<QString> waiting = std::exchange(m_mediaWaiting, {});
+    if (waiting.isEmpty() && m_mediaSubscribers.isEmpty()) {
+        return;
+    }
+    QJsonObject media;
+    if (m_media.isAvailable()) {
+        media = m_media.snapshot();
+    } else {
+        media.insert(QLatin1StringView("error"), m_media.unavailableReason());
+    }
+    const QByteArray digest = QCryptographicHash::hash(
+        QJsonDocument(media).toJson(QJsonDocument::Compact), QCryptographicHash::Sha256);
+
+    const QSet<QString> targets = waiting | m_mediaSubscribers;
+    for (const QString &deviceId : targets) {
+        Connection *connection = connectionForDevice(deviceId);
+        const auto link = connection ? linkFor(connection) : nullptr;
+        // Re-checked on every push: switching the capability off ends a
+        // subscription at once, not at the next request.
+        if (!link || !capabilityAllowed(*link, Capability::Media)) {
+            m_mediaSubscribers.remove(deviceId);
+            continue;
+        }
+        // A request is always answered; a push only when something changed.
+        if (!waiting.contains(deviceId) && m_lastMediaSent.value(deviceId) == digest) {
+            continue;
+        }
+        m_lastMediaSent.insert(deviceId, digest);
+        connection->send(Message::mediaState(connection->nextCounter(), media));
+    }
+    m_media.setWatching(!m_mediaSubscribers.isEmpty());
 }
 
 bool DeviceManager::sendOpenOnPhone(const QString &text) {
@@ -1505,7 +1833,7 @@ void DeviceManager::respondToFileOffer(const QString &deviceId, quint32 transfer
         return;
     }
     const auto it = m_pendingOffers.find(transferId);
-    if (it == m_pendingOffers.end()) {
+    if (it == m_pendingOffers.end() || it->deviceId != deviceId) {
         return;
     }
 

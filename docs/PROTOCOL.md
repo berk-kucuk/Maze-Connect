@@ -135,11 +135,21 @@ identity.
 | Capability | Default | Messages |
 | --- | --- | --- |
 | `fileTransfer` | on — every incoming file still prompts | `fileOffer` / `fileAccept` / `fileReject` / `fileComplete` / `fileCancel` |
-| `systemStatus` | **off** | `statusRequest` → `statusReport` |
+| `systemStatus` | on | `statusRequest` → `statusReport` / `statusUnchanged` |
+| `commands` | on | `commandList` → `commandCatalog`, `commandRun` → `commandResult` |
+| `ai` | on | `aiModels` → `aiModelList`, `aiPrompt` → `aiChunk`* → `aiDone` |
+| `guardControl` | on | `guardStatus` → `guardReport`, `guardRequest` → `guardResult` |
+| `openOnPhone` | on | `openOnPhone` (computer → phone only) |
+| `media` | on | `mediaRequest` → `mediaState`*, `mediaCommand` |
 
-Planned, in order: `commands` (`commandList`/`commandCatalog`,
-`commandRun`/`commandResult`), `guardControl` (`guardRequest`/`guardResult`)
-and `ai` (`aiModels`/`aiModelList`, `aiPrompt` → `aiChunk`* → `aiDone`).
+Every capability is granted by pairing and revocable per device on the
+computer. A message is only ever sent to a peer that advertised the
+capability it belongs to, so a capability can be added without a protocol
+version bump: an older peer never advertises it and is never sent it.
+
+Transfer ids are scoped to the device that offered them. A `fileAccept`,
+`fileCancel`, `fileComplete` or data frame from any other device for the
+same id is ignored (or, for a data frame, drops that link).
 
 ## systemStatus
 
@@ -161,9 +171,55 @@ envelope, so no future field of it can collide with `v`, `t` or `c`.
 A report is only accepted from a device the receiver actually asked. Being
 paired is not by itself a licence to put content on someone's screen.
 
+## media
+
+The computer's MPRIS players (anything in the desktop's own media controls)
+and its default output volume.
+
+`mediaRequest` carries `subscribe`. It is always answered with one
+`mediaState`; with `subscribe: true` the computer also pushes a `mediaState`
+whenever a player changes, until a request with `false` arrives or the link
+drops. Only a device that asked may have a `mediaState` shown.
+
+```json
+{ "v": 4, "t": "mediaRequest", "c": 4, "subscribe": true }
+{ "v": 4, "t": "mediaState", "c": 7, "media": {
+    "players": [ { "id": "spotify", "name": "Spotify", "status": "playing",
+                   "title": "…", "artist": "…", "album": "…",
+                   "lengthMs": 231000, "positionMs": 12000,
+                   "canPlay": true, "canPause": true, "canNext": true,
+                   "canPrevious": false, "canSeek": true, "volume": 50 } ],
+    "active": "spotify", "systemVolume": 40, "systemMuted": false,
+    "notice": "Spotify has no previous track" } }
+{ "v": 4, "t": "mediaState", "c": 7, "media": { "error": "no desktop session bus" } }
+```
+
+`positionMs` is the position when the state was sent; the phone moves it
+forward itself while `status` is `playing`. `volume` is absent for a player
+without its own volume; `systemVolume` is absent when the computer has no
+volume tool.
+
+`mediaCommand` carries `player` (an `id` from the last `mediaState`),
+`action` and `value`:
+
+| `action` | `value` |
+| --- | --- |
+| `play`, `pause`, `playPause`, `next`, `previous`, `stop` | ignored |
+| `seek` | position in ms (clamped to the track) |
+| `setVolume` | player volume, 0–100 |
+| `systemVolume` | output volume, 0–100 (`player` ignored) |
+| `systemMute` | 1 mute, 0 unmute (`player` ignored) |
+
+Both strings are looked up on the computer — the action in a fixed table,
+the player among the ones it found itself — and never used to build a bus
+name, a method or an argv. A command that cannot be carried out is answered
+with a `mediaState` whose `notice` says why; a command that worked is
+answered by the change itself. More than a few commands a second from one
+device are dropped unanswered.
+
 ## Scope
 
 v2 dropped notification mirroring, clipboard sync and ping/find-my-device:
 KDE Connect already does those. What remains is managing the machine itself,
-plus file transfer. Deferred indefinitely: media/MPRIS control, battery
-sharing, remote input, SMS.
+file transfer, and — since desktop 1.2.0 / mobile 0.14.0 — its media
+players. Deferred indefinitely: battery sharing, remote input, SMS.

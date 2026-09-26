@@ -21,6 +21,12 @@ constexpr qint64 kStaleAfterSecs = 17;
 // Minimum spacing between datagrams we will actually act on from one source.
 constexpr qint64 kMinAcceptIntervalMs = 1000;
 
+// Anyone on the LAN can send beacons, one per made-up device id. Without a
+// ceiling both tables below grew by one entry per forged id for as long as
+// the sender kept going; a home network has a handful of real devices.
+constexpr int kMaxDevices = 64;
+constexpr int kMaxRateEntries = 256;
+
 bool hasControlCharacters(const QString &s) {
     for (const QChar c : s) {
         const char16_t u = c.unicode();
@@ -41,6 +47,35 @@ QString boundedString(const QJsonObject &obj, QLatin1StringView key, int maxChar
         return {};
     }
     return s;
+}
+
+/**
+ * An interface the local network is actually on.
+ *
+ * VPN tunnels are the reason this exists. With ProtonVPN (or any full-tunnel
+ * VPN) up, the kernel routes the multicast group through the tunnel, because
+ * the tunnel owns the default route — so an announcement sent "to the group"
+ * went into the VPN and never reached the Wi-Fi the phone is on. The phone
+ * simply never saw this computer, while the firewall, the port and the app
+ * were all fine. Announcements now leave through each LAN interface by name.
+ */
+bool isLanInterface(const QNetworkInterface &iface) {
+    const auto flags = iface.flags();
+    if (!flags.testFlag(QNetworkInterface::IsUp) || !flags.testFlag(QNetworkInterface::IsRunning)
+        || flags.testFlag(QNetworkInterface::IsLoopBack)
+        || flags.testFlag(QNetworkInterface::IsPointToPoint)) {
+        return false;
+    }
+    static const char *const kVirtual[] = {"tun", "tap", "wg", "ppp", "pvpn", "proton", "nordlynx",
+                                           "vpn", "docker", "veth", "virbr", "br-", "vmnet",
+                                           "tailscale", "zt"};
+    const QString name = iface.name();
+    for (const char *prefix : kVirtual) {
+        if (name.startsWith(QLatin1StringView(prefix))) {
+            return false;
+        }
+    }
+    return true;
 }
 
 } // namespace
@@ -87,11 +122,8 @@ bool Beacon::start(const QString &deviceId,
     const QHostAddress group(QString::fromLatin1(kMulticastGroup));
     bool joinedAny = false;
     for (const QNetworkInterface &iface : QNetworkInterface::allInterfaces()) {
-        const auto flags = iface.flags();
-        if (!flags.testFlag(QNetworkInterface::IsUp)
-            || !flags.testFlag(QNetworkInterface::IsRunning)
-            || flags.testFlag(QNetworkInterface::IsLoopBack)
-            || !flags.testFlag(QNetworkInterface::CanMulticast)) {
+        if (!isLanInterface(iface)
+            || !iface.flags().testFlag(QNetworkInterface::CanMulticast)) {
             continue;
         }
         if (m_socket->joinMulticastGroup(group, iface)) {
@@ -150,7 +182,42 @@ void Beacon::sendAnnounce() {
     obj.insert(QLatin1StringView("port"), m_servicePort);
 
     const QByteArray payload = QJsonDocument(obj).toJson(QJsonDocument::Compact);
-    m_socket->writeDatagram(payload, QHostAddress(QString::fromLatin1(kMulticastGroup)), kPort);
+    const QHostAddress group(QString::fromLatin1(kMulticastGroup));
+
+    // Out of every LAN interface by name, never "wherever the route goes" —
+    // see isLanInterface() for why that was into a VPN tunnel. And also as a
+    // subnet broadcast: plenty of home routers filter multicast between
+    // Wi-Fi and Ethernet (IGMP snooping with no querier), and a broadcast to
+    // the subnet's own address crosses them. The phone listens on the same
+    // port for both; duplicate copies are absorbed by its rate limit.
+    bool sentAny = false;
+    for (const QNetworkInterface &iface : QNetworkInterface::allInterfaces()) {
+        if (!isLanInterface(iface)) {
+            continue;
+        }
+        bool hasIpv4 = false;
+        for (const QNetworkAddressEntry &entry : iface.addressEntries()) {
+            if (entry.ip().protocol() != QAbstractSocket::IPv4Protocol) {
+                continue;
+            }
+            hasIpv4 = true;
+            const QHostAddress broadcast = entry.broadcast();
+            if (!broadcast.isNull()
+                && iface.flags().testFlag(QNetworkInterface::CanBroadcast)) {
+                m_socket->writeDatagram(payload, broadcast, kPort);
+            }
+        }
+        if (hasIpv4 && iface.flags().testFlag(QNetworkInterface::CanMulticast)) {
+            m_socket->setMulticastInterface(iface);
+            m_socket->writeDatagram(payload, group, kPort);
+            sentAny = true;
+        }
+    }
+    if (!sentAny) {
+        // No LAN interface we recognise: fall back to the routing table.
+        m_socket->setMulticastInterface(QNetworkInterface());
+        m_socket->writeDatagram(payload, group, kPort);
+    }
 }
 
 void Beacon::readPendingDatagrams() {
@@ -199,7 +266,13 @@ void Beacon::readPendingDatagrams() {
 
         // Per-source rate limit, keyed on the claimed id *and* the source
         // address so spoofing one field alone does not bypass it.
+        if (!m_devices.contains(deviceId) && m_devices.size() >= kMaxDevices) {
+            continue;
+        }
         const QString sourceKey = deviceId + u'@' + datagram.senderAddress().toString();
+        if (!m_lastAccepted.contains(sourceKey) && m_lastAccepted.size() >= kMaxRateEntries) {
+            continue;
+        }
         const QDateTime now = QDateTime::currentDateTimeUtc();
         const auto lastIt = m_lastAccepted.constFind(sourceKey);
         if (lastIt != m_lastAccepted.constEnd()
@@ -232,6 +305,9 @@ void Beacon::pruneStale() {
             m_devices.remove(id);
             emit deviceLost(id);
         }
+    }
+    for (auto it = m_lastAccepted.begin(); it != m_lastAccepted.end();) {
+        it = it.value().secsTo(now) > kStaleAfterSecs ? m_lastAccepted.erase(it) : std::next(it);
     }
 }
 

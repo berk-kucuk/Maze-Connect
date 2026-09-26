@@ -5,6 +5,8 @@
 
 #include <QSslSocket>
 
+#include <memory>
+
 namespace mazeconnect::core {
 
 Server::Server(const Identity &identity, const DeviceStore *store, QObject *parent)
@@ -64,13 +66,23 @@ void Server::incomingConnection(qintptr socketDescriptor) {
     auto *connection = new Connection(socket, m_identity, m_store, mode, this);
     connection->setHandshakeTimeout(m_handshakeTimeoutMs);
 
-    connect(connection, &Connection::established, this, [this, connection]() {
+    // Whether the handshake got through decides what a failure means. Before
+    // it, a failure is a refused connection — the thing an impersonation
+    // attempt looks like, and worth the user's attention. After it, it is an
+    // established link ending: a heartbeat timeout when the phone sleeps or
+    // leaves the Wi-Fi. That used to be reported as "Refused a connection"
+    // too, a security alert for every phone walking out of range.
+    auto established = std::make_shared<bool>(false);
+    connect(connection, &Connection::established, this, [this, connection, established]() {
+        *established = true;
         emit connectionEstablished(connection);
     });
     connect(connection, &Connection::failed, this,
-            [this, connection, peer, host](const QString &reason) {
+            [this, connection, peer, host, established](const QString &reason) {
                 releaseSlot(host);
-                emit connectionRejected(peer, reason);
+                if (!*established) {
+                    emit connectionRejected(peer, reason);
+                }
                 connection->deleteLater();
             });
     connect(connection, &Connection::disconnected, this, [this, connection, host]() {
