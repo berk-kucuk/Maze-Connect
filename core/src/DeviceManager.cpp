@@ -1,4 +1,5 @@
 #include "mazeconnect/core/DeviceManager.h"
+#include "mazeconnect/core/PhoneStatus.h"
 
 #include "mazeconnect/core/Limits.h"
 #include "mazeconnect/core/PathSanitizer.h"
@@ -638,6 +639,15 @@ void DeviceManager::forgetPendingWork(const QString &deviceId) {
     m_mediaCommandRate.remove(deviceId);
     m_media.setWatching(!m_mediaSubscribers.isEmpty());
 
+    m_phoneStatusAwaiting.remove(deviceId);
+    m_shareTextRate.remove(deviceId);
+    if (m_findPhoneAwaiting.remove(deviceId)) {
+        // Whatever it was doing, this side can no longer see or stop it —
+        // the UI must not keep offering "Stop ringing" for a phone it cannot
+        // reach. The phone stops on its own timer.
+        emit findPhoneAnswered(deviceId, false, tr("the phone disconnected"));
+    }
+
     // A half-received file cannot be finished over a link that is gone. Left
     // in place its .part file stayed in the inbox until the app quit, and it
     // kept counting against the receiver's concurrency limit: after eight
@@ -832,6 +842,9 @@ void DeviceManager::handleMessage(Connection *connection, const Message &message
         link->peerCapabilities = capabilitiesFromNames(
             message.stringList(QLatin1StringView("capabilities"), 32, 32));
         emit deviceListChanged();
+        if (link->trusted) {
+            emit deviceReady(link->deviceId);
+        }
         break;
     }
 
@@ -1359,6 +1372,65 @@ void DeviceManager::handleMessage(Connection *connection, const Message &message
         break;
     }
 
+    case MessageType::PhoneStatus: {
+        // Asked-for only, exactly like a dashboard snapshot. The capability
+        // is re-checked at delivery so a revocation takes effect at once.
+        if (!m_phoneStatusAwaiting.remove(link->deviceId)
+            || !capabilityAllowed(*link, Capability::PhoneStatus)) {
+            qCInfo(lcLink) << "ignoring unsolicited phone status from" << link->deviceId;
+            break;
+        }
+        const QString error = message.string(QLatin1StringView("error"), 200);
+        if (!error.isEmpty()) {
+            emit phoneStatusReceived(link->deviceId, QVariantMap(), error);
+            break;
+        }
+        const QVariantMap status =
+            phonestatus::sanitize(message.unvalidatedObject(QLatin1StringView("status")));
+        emit phoneStatusReceived(link->deviceId, status,
+                                 status.isEmpty() ? tr("the phone sent an unreadable reading")
+                                                  : QString());
+        break;
+    }
+
+    case MessageType::FindPhoneResult: {
+        if (!m_findPhoneAwaiting.contains(link->deviceId)
+            || !capabilityAllowed(*link, Capability::FindPhone)) {
+            qCInfo(lcLink) << "ignoring unsolicited find-phone result from" << link->deviceId;
+            break;
+        }
+        const bool ringing = message.boolean(QLatin1StringView("ringing"));
+        if (!ringing) {
+            m_findPhoneAwaiting.remove(link->deviceId);
+        }
+        emit findPhoneAnswered(link->deviceId, ringing,
+                               message.string(QLatin1StringView("error"), 200));
+        break;
+    }
+
+    case MessageType::ShareText: {
+        if (!capabilityAllowed(*link, Capability::ShareText)) {
+            qCInfo(lcLink) << "refusing shared text from" << link->deviceId
+                           << "(switched off for that device)";
+            break;
+        }
+        if (!allowShareText(link->deviceId)) {
+            qCInfo(lcLink) << "dropping shared text from" << link->deviceId << "(rate limit)";
+            break;
+        }
+        const QString text =
+            message.text(QLatin1StringView("text"), limits::kMaxShareTextChars);
+        if (text.trimmed().isEmpty()) {
+            break;
+        }
+        emit textShared(link->deviceId, text);
+        break;
+    }
+
+    case MessageType::PhoneStatusRequest:
+    case MessageType::FindPhone:
+        // Phone-side messages: a computer has no battery reading to give and
+        // no ringer to sound. A peer sending one has the direction wrong.
     case MessageType::MediaState:
     case MessageType::GuardReport:
     case MessageType::GuardResult:
@@ -1534,6 +1606,9 @@ void DeviceManager::finalizePairing(const std::shared_ptr<Link> &link) {
     emit pairingCompleted(deviceId, true);
     emit deviceConnected(deviceId);
     emit deviceListChanged();
+    if (link->helloReceived) {
+        emit deviceReady(deviceId);
+    }
 }
 
 DeviceManager::PairingStart DeviceManager::requestPairing(const QString &deviceId) {
@@ -1809,6 +1884,67 @@ bool DeviceManager::sendOpenOnPhone(const QString &text) {
         return link->connection->send(message);
     }
     return false;
+}
+
+bool DeviceManager::sendOpenOnPhone(const QString &deviceId, const QString &text) {
+    if (text.isEmpty() || text.size() > limits::kMaxOpenTextChars) {
+        return false;
+    }
+    const auto link = linkForDevice(deviceId);
+    if (!link || !capabilityAllowed(*link, Capability::OpenOnPhone)) {
+        return false;
+    }
+    return link->connection->send(
+        Message::openOnPhone(link->connection->nextCounter(), text));
+}
+
+bool DeviceManager::requestPhoneStatus(const QString &deviceId) {
+    const auto link = linkForDevice(deviceId);
+    if (!link || !capabilityAllowed(*link, Capability::PhoneStatus)) {
+        return false;
+    }
+    if (!link->connection->send(
+            Message::phoneStatusRequest(link->connection->nextCounter()))) {
+        return false;
+    }
+    m_phoneStatusAwaiting.insert(deviceId);
+    return true;
+}
+
+bool DeviceManager::ringPhone(const QString &deviceId, bool ring) {
+    const auto link = linkForDevice(deviceId);
+    if (!link || !capabilityAllowed(*link, Capability::FindPhone)) {
+        return false;
+    }
+    if (!link->connection->send(Message::findPhone(link->connection->nextCounter(), ring))) {
+        return false;
+    }
+    // Kept for a stop as well: its acknowledgement is what clears the state.
+    m_findPhoneAwaiting.insert(deviceId);
+    return true;
+}
+
+bool DeviceManager::allows(const QString &deviceId, Capability capability) const {
+    for (const auto &link : m_links) {
+        if (link->deviceId == deviceId && link->trusted) {
+            return capabilityAllowed(*link, capability);
+        }
+    }
+    return false;
+}
+
+bool DeviceManager::allowShareText(const QString &deviceId) {
+    static QElapsedTimer clock;
+    if (!clock.isValid()) {
+        clock.start();
+    }
+    const qint64 now = clock.elapsed();
+    RateWindow &window = m_shareTextRate[deviceId];
+    if (now - window.startedMs >= limits::kShareTextWindowMs) {
+        window.startedMs = now;
+        window.count = 0;
+    }
+    return ++window.count <= limits::kMaxShareTextsPerWindow;
 }
 
 bool DeviceManager::requestStatus(const QString &deviceId) {

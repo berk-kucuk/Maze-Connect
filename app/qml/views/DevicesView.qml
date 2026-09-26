@@ -144,6 +144,16 @@ Item {
                     onClicked: Backend.requestPairing(card.deviceId)
                 }
 
+                // Ring is here as well as on the dashboard: this is the page
+                // people open when they are looking *for* a device.
+                MazeButton {
+                    text: qsTr("Ring")
+                    glyph: "♪"
+                    visible: card.paired && card.deviceType !== "desktop"
+                    enabled: card.connected
+                    onClicked: Backend.ringPhone(card.deviceId)
+                }
+
                 MazeButton {
                     text: qsTr("Send file")
                     glyph: "↥"

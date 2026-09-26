@@ -38,6 +38,17 @@ inline constexpr int kMaxFilenameChars = 255;
 // URL is broken rather than merely shorter.
 inline constexpr int kMaxOpenTextChars = 4096;
 
+// Longest text a phone may share to this computer's clipboard. Larger than
+// the link-sized bound above because a shared note is a real use, still far
+// under the control-frame cap. Refused, not truncated, for the same reason.
+inline constexpr int kMaxShareTextChars = 16384;
+
+// At most this many shared texts per device inside kShareTextWindowMs. A
+// clipboard that a phone can overwrite in a loop is a clipboard the user
+// cannot use.
+inline constexpr int kMaxShareTextsPerWindow = 5;
+inline constexpr int kShareTextWindowMs = 10000;
+
 // Handshake must complete within this window or the socket is dropped, so a
 // peer cannot pin resources by opening connections and stalling.
 inline constexpr int kHandshakeTimeoutMs = 15000;

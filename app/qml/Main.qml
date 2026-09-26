@@ -30,7 +30,11 @@ Window {
     // Blur behind the panel is applied from C++ (WindowEffects), since it is
     // a property of the window rather than of the scene.
 
+    // The dashboard is the home page once there is a phone to show on it;
+    // before that, the page that pairs one. Decided once at start — after
+    // that the page is the user's choice.
     property int currentView: 0
+    Component.onCompleted: currentView = Backend.pairedCount > 0 ? 0 : 1
 
     // Escape closes, as it does across the suite.
     Shortcut {
@@ -103,23 +107,23 @@ Window {
                 Item { width: 1; height: 18 }
 
                 NavButton {
+                    icon: "dashboard"
+                    label: qsTr("Dashboard")
+                    current: root.currentView === 0
+                    onClicked: root.currentView = 0
+                }
+                NavButton {
                     icon: "devices"
                     label: qsTr("Devices")
-                    current: root.currentView === 0
+                    current: root.currentView === 1
                     badge: Backend.pairedCount
-                    onClicked: root.currentView = 0
+                    onClicked: root.currentView = 1
                 }
                 NavButton {
                     icon: "transfers"
                     label: qsTr("Transfers")
-                    current: root.currentView === 1
-                    badge: Backend.transfers.activeCount
-                    onClicked: root.currentView = 1
-                }
-                NavButton {
-                    icon: "dashboard"
-                    label: qsTr("Dashboard")
                     current: root.currentView === 2
+                    badge: Backend.transfers.activeCount
                     onClicked: root.currentView = 2
                 }
                 NavButton {
@@ -195,7 +199,7 @@ Window {
                 id: titleBar
                 width: parent.width
                 window: root
-                title: [qsTr("Devices"), qsTr("Transfers"), qsTr("Dashboard"),
+                title: [qsTr("Dashboard"), qsTr("Devices"), qsTr("Transfers"),
                         qsTr("Commands"), qsTr("Guard"), qsTr("Activity"),
                         qsTr("Settings")][root.currentView]
                 subtitle: Backend.statusMessage
@@ -208,9 +212,13 @@ Window {
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
 
-                DevicesView { anchors.fill: parent; visible: root.currentView === 0 }
-                TransfersView { anchors.fill: parent; visible: root.currentView === 1 }
-                DashboardView { anchors.fill: parent; visible: root.currentView === 2 }
+                DashboardView {
+                    anchors.fill: parent
+                    visible: root.currentView === 0
+                    onOpenDevices: root.currentView = 1
+                }
+                DevicesView { anchors.fill: parent; visible: root.currentView === 1 }
+                TransfersView { anchors.fill: parent; visible: root.currentView === 2 }
                 CommandsView { anchors.fill: parent; visible: root.currentView === 3 }
                 GuardView { anchors.fill: parent; visible: root.currentView === 4 }
                 ActivityView { anchors.fill: parent; visible: root.currentView === 5 }

@@ -20,6 +20,9 @@ enum class Capability : quint32 {
     GuardControl = 0x10, ///< toggle maze-guard killswitches (privileged)
     OpenOnPhone = 0x20,  ///< push the desktop's clipboard to the phone to open
     Media = 0x40,        ///< see and control this computer's media players
+    PhoneStatus = 0x80,  ///< read a paired phone's battery, storage and network
+    FindPhone = 0x100,   ///< make a paired phone ring, even when it is silenced
+    ShareText = 0x200,   ///< a phone sends text or a link to this computer's clipboard
 };
 Q_DECLARE_FLAGS(Capabilities, Capability)
 Q_DECLARE_OPERATORS_FOR_FLAGS(Capabilities)
@@ -35,7 +38,8 @@ Q_DECLARE_OPERATORS_FOR_FLAGS(Capabilities)
 inline constexpr Capabilities supportedCapabilities() {
     return Capabilities(Capability::FileTransfer) | Capability::SystemStatus
         | Capability::Commands | Capability::Ai | Capability::GuardControl
-        | Capability::OpenOnPhone | Capability::Media;
+        | Capability::OpenOnPhone | Capability::Media | Capability::PhoneStatus
+        | Capability::FindPhone | Capability::ShareText;
 }
 
 /**

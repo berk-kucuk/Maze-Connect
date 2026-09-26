@@ -16,6 +16,9 @@ constexpr Entry kEntries[] = {
     {Capability::GuardControl, "guardControl"},
     {Capability::OpenOnPhone, "openOnPhone"},
     {Capability::Media, "media"},
+    {Capability::PhoneStatus, "phoneStatus"},
+    {Capability::FindPhone, "findPhone"},
+    {Capability::ShareText, "shareText"},
 };
 
 } // namespace

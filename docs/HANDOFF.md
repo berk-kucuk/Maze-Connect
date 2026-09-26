@@ -967,3 +967,69 @@ beacon'ı bu firewall'un ardından alındı ve journald'da 15 tane
 `link established` var, yani gelen TCP de geçiyor.
 
 Sürüm 1.0.3-1. `ctest` 13/13.
+
+
+---
+
+## 1.3.0 — Dashboard artık telefonu gösteriyor; telefonu bul; telefondan metin
+
+Bildirilen: masaüstündeki Dashboard bilgisayarın kendi CPU/bellek/diskini
+gösteriyordu — kullanıcının zaten önünde oturduğu makinenin okuması. Anlamsız.
+KDE Connect'ten daha iyi ve daha profesyonel olması istendi.
+
+**Dashboard = bağlı telefonlar.** Her eşleşmiş telefon için bir kart: pil
+halkası (seviye, şarj ve kaynağı, sıcaklık, sağlık), depolama ve bellek
+ölçerleri, ağ türü + Wi-Fi çubukları, zil modu, Rahatsız Etmeyin, güç
+tasarrufu, model/Android/açık kalma süresi; altında *Çaldır*, *Dosya gönder*,
+*Panoyu gönder*. Erişilemeyen telefon son okumasını soluk ve yaşıyla birlikte
+tutuyor. Altında "Bu bilgisayar" kutucukları (aktarımlar, komutlar, guard,
+adres). Sidebar'da Dashboard artık ilk sayfa (Ctrl+1) ve telefon eşleşmişse
+açılış sayfası; eşleşme yoksa Devices açılıyor.
+
+Bilgisayarın kendi anlık görüntüsü kaybolmadı — telefonun panosuna gitmeye
+devam ediyor, sadece burada çizilmiyor. `Backend.systemStatus` kaldırıldı.
+
+**Yeni yetenekler** (protokol sürümü değişmedi; yalnızca ilan eden eşe
+gönderiliyor, eski eşleşmelere `knownCapabilities` göçüyle otomatik veriliyor):
+
+| Yetenek | Yön | Mesajlar |
+| --- | --- | --- |
+| `phoneStatus` (0x80) | bilgisayar sorar, telefon cevaplar | `phoneStatusRequest` → `phoneStatus` |
+| `findPhone` (0x100) | bilgisayar → telefon | `findPhone` → `findPhoneResult` |
+| `shareText` (0x200) | telefon → bilgisayar | `shareText` |
+
+Güvenlik tarafında sabitlenenler:
+- `phoneStatus` yalnızca **istenmişse** kabul ediliyor ve
+  `phonestatus::sanitize()` her alanı tür/aralık/kapalı listeyle süzüyor;
+  geçemeyen alan **yok** sayılıyor, varsayılana düşmüyor (%0 pil sahte alarm
+  olurdu).
+- `shareText` için `Message::text()` eklendi: tab/LF/CR serbest, diğer kontrol
+  karakterleri ve **bidi override/isolate** (U+202A–202E, U+2066–2069) alanı
+  tümden reddediyor — bir linki başka yere gidiyormuş gibi gösteren karakterler.
+  16 384 karakter üstü reddediliyor (kırpılmıyor), cihaz başına 10 sn'de en
+  fazla 5. Metin panoya gidiyor, bildirim + Activity kaydı çıkıyor; http(s)
+  linki **yalnızca bildirime tıklanınca** açılıyor, telefon asla açamıyor.
+- `findPhoneResult` yalnızca açık bir çaldırma varken alınıyor; `ringing:false`
+  sonrası bir sonraki çaldırmaya kadar hiçbir şey alınmıyor. Link kopunca UI
+  "Stop ringing" göstermeyi bırakıyor.
+
+**Bildirimler ve tepsi.** Düşük pil (%15, döngü başına bir kez; şarj ya da
+%20 üstü yeniden kuruyor), tam şarj (yalnızca 100'e *çıkışta* — yeniden
+başlatınca zaten dolu olan telefon için değil). Tepsi menüsüne *Find my phone*,
+ipucuna telefonlar ve pil yüzdesi. Pencere tepside gizliyken pano 5 sn'de bir
+yoklamıyor (`Window.window.visible` dahil ediliyor), dakikada bir.
+
+**Testler:** yeni `tst_phonelink` (9 vaka) — sahte telefon: bilgisayarın
+deposuna anahtarı yazılmış çıplak bir `Connection`, gerçek karşılıklı TLS
+üzerinden istenmemiş cevap, sel, bidi hilesi, çaldırmasız sonuç gönderiyor.
+"İstenmemiş okuma" kontrolü mutasyonla kapatılınca test düşüyor.
+`tst_interop::phoneMessageShape` mobildeki eşiyle aynı adları çiviliyor.
+**15/15 ctest**, qmllint uyarısız (önceden kalan `CommandsView` ve
+`GlassPanel` uyarıları da giderildi).
+
+Görsel doğrulama: `PhoneCard` sahte veriyle ekransız çizilip ekran görüntüsü
+alındı (bağlı/şarjda, erişilemeyen/düşük pil, eski sürüm telefon). Gerçek bir
+telefonla canlı tur yapılmadı — mobil 0.15.0 ile birlikte denenecek.
+
+Sürüm 1.3.0-1. **Mobil 0.15.0 ile birlikte yayınla**; eski mobil sürüm bu
+yetenekleri ilan etmediği için kart "update it to 0.15.0" diyor.

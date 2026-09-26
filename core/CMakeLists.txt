@@ -19,6 +19,7 @@ add_library(mazeconnect-core
     src/plugins/CommandRunner.cpp
     src/plugins/GuardBridge.cpp
     src/plugins/MediaBridge.cpp
+    src/plugins/PhoneStatus.cpp
     src/plugins/StatusProvider.cpp
     src/storage/DeviceStore.cpp
     src/discovery/Beacon.cpp
@@ -40,6 +41,7 @@ add_library(mazeconnect-core
     include/mazeconnect/core/CommandRunner.h
     include/mazeconnect/core/GuardBridge.h
     include/mazeconnect/core/MediaBridge.h
+    include/mazeconnect/core/PhoneStatus.h
     include/mazeconnect/core/StatusProvider.h
     include/mazeconnect/core/DeviceStore.h
     include/mazeconnect/core/Beacon.h

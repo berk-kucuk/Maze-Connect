@@ -54,12 +54,38 @@ constexpr TypeEntry kTypes[] = {
     {MessageType::MediaRequest, "mediaRequest"},
     {MessageType::MediaState, "mediaState"},
     {MessageType::MediaCommand, "mediaCommand"},
+    {MessageType::PhoneStatusRequest, "phoneStatusRequest"},
+    {MessageType::PhoneStatus, "phoneStatus"},
+    {MessageType::FindPhone, "findPhone"},
+    {MessageType::FindPhoneResult, "findPhoneResult"},
+    {MessageType::ShareText, "shareText"},
 };
 
 bool hasControlCharacters(const QString &s) {
     for (const QChar c : s) {
         const char16_t u = c.unicode();
         if (u < 0x20 || u == 0x7F || (u >= 0x80 && u <= 0x9F)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Controls a piece of free text may not carry: everything hasControlCharacters()
+/// refuses except tab, LF and CR, plus the bidirectional overrides and
+/// isolates. The latter pass the C0/C1 test, and they are exactly how a link
+/// is made to display as something other than where it goes — so they are
+/// refused rather than rendered.
+bool hasDisallowedTextCharacters(const QString &s) {
+    for (const QChar c : s) {
+        const char16_t u = c.unicode();
+        if (u == u'\t' || u == u'\n' || u == u'\r') {
+            continue;
+        }
+        if (u < 0x20 || u == 0x7F || (u >= 0x80 && u <= 0x9F)) {
+            return true;
+        }
+        if ((u >= 0x202A && u <= 0x202E) || (u >= 0x2066 && u <= 0x2069)) {
             return true;
         }
     }
@@ -145,6 +171,18 @@ QString Message::string(QLatin1StringView key, int maxChars) const {
     }
     const QString s = value.toString();
     if (s.size() > maxChars || hasControlCharacters(s)) {
+        return {};
+    }
+    return s;
+}
+
+QString Message::text(QLatin1StringView key, int maxChars) const {
+    const QJsonValue value = m_body.value(key);
+    if (!value.isString()) {
+        return {};
+    }
+    const QString s = value.toString();
+    if (s.size() > maxChars || hasDisallowedTextCharacters(s)) {
         return {};
     }
     return s;
@@ -456,6 +494,43 @@ Message Message::mediaCommand(quint64 counter, const QString &player, const QStr
     body.insert(QLatin1StringView("action"), action);
     body.insert(QLatin1StringView("value"), value);
     return Message(MessageType::MediaCommand, counter, body);
+}
+
+Message Message::phoneStatusRequest(quint64 counter) {
+    return Message(MessageType::PhoneStatusRequest, counter, QJsonObject());
+}
+
+Message Message::phoneStatus(quint64 counter, const QJsonObject &status) {
+    QJsonObject body;
+    body.insert(QLatin1StringView("status"), status);
+    return Message(MessageType::PhoneStatus, counter, body);
+}
+
+Message Message::phoneStatusUnavailable(quint64 counter, const QString &reason) {
+    QJsonObject body;
+    body.insert(QLatin1StringView("error"), reason);
+    return Message(MessageType::PhoneStatus, counter, body);
+}
+
+Message Message::findPhone(quint64 counter, bool ring) {
+    QJsonObject body;
+    body.insert(QLatin1StringView("ring"), ring);
+    return Message(MessageType::FindPhone, counter, body);
+}
+
+Message Message::findPhoneResult(quint64 counter, bool ringing, const QString &error) {
+    QJsonObject body;
+    body.insert(QLatin1StringView("ringing"), ringing);
+    if (!error.isEmpty()) {
+        body.insert(QLatin1StringView("error"), error);
+    }
+    return Message(MessageType::FindPhoneResult, counter, body);
+}
+
+Message Message::shareText(quint64 counter, const QString &text) {
+    QJsonObject body;
+    body.insert(QLatin1StringView("text"), text);
+    return Message(MessageType::ShareText, counter, body);
 }
 
 // ---- Data chunk framing -------------------------------------------------

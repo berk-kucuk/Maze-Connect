@@ -46,6 +46,11 @@ enum class MessageType {
     MediaRequest,   ///< phone -> computer: send the players now, and (un)subscribe
     MediaState,     ///< computer -> phone: the players, their track and position
     MediaCommand,   ///< phone -> computer: one action from a fixed table
+    PhoneStatusRequest, ///< computer -> phone: send your battery/storage/network reading
+    PhoneStatus,    ///< phone -> computer: that reading, or why there isn't one
+    FindPhone,      ///< computer -> phone: start or stop ringing
+    FindPhoneResult,///< phone -> computer: whether it is ringing now, or why not
+    ShareText,      ///< phone -> computer: text or a link for the clipboard
 };
 
 /**
@@ -97,6 +102,15 @@ public:
 
     /// String array, each element bounded; capped in length.
     QStringList stringList(QLatin1StringView key, int maxItems, int maxChars) const;
+
+    /**
+     * Free text — a clipboard, a shared note — bounded like string() but
+     * allowing the three whitespace controls ordinary text is made of: tab,
+     * line feed and carriage return. Every other control character, and the
+     * bidirectional overrides that make a link read as something it is not,
+     * still reject the field outright rather than being stripped.
+     */
+    QString text(QLatin1StringView key, int maxChars) const;
 
     /**
      * A nested object, returned **unchecked**, for payloads whose shape this
@@ -270,6 +284,22 @@ public:
      */
     static Message mediaCommand(quint64 counter, const QString &player, const QString &action,
                                 qint64 value);
+
+    /// Ask a phone for its reading. Envelope only, like statusRequest.
+    static Message phoneStatusRequest(quint64 counter);
+
+    /// Built by the phone; here so the interop vectors and tests can make it.
+    static Message phoneStatus(quint64 counter, const QJsonObject &status);
+    static Message phoneStatusUnavailable(quint64 counter, const QString &reason);
+
+    /// Start (@p ring true) or stop ringing a phone.
+    static Message findPhone(quint64 counter, bool ring);
+
+    /// Built by the phone; here so tests can make it.
+    static Message findPhoneResult(quint64 counter, bool ringing, const QString &error);
+
+    /// Built by the phone; here so tests can make it.
+    static Message shareText(quint64 counter, const QString &text);
 
     static QString typeName(MessageType type);
     static MessageType typeFromName(const QString &name);

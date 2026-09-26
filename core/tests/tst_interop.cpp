@@ -41,6 +41,7 @@ private slots:
     void aiMessageShape();
     void guardMessageShape();
     void mediaMessageShape();
+    void phoneMessageShape();
 };
 
 void TestInterop::frameHeaderLayout() {
@@ -445,6 +446,41 @@ void TestInterop::mediaMessageShape() {
         QVERIFY2(mediaActionFromName(name, action), qPrintable(name));
         QCOMPARE(mediaActionName(action), name);
     }
+}
+
+void TestInterop::phoneMessageShape() {
+    // Duplicated in InteropTest.phoneMessageShape.
+    QCOMPARE(capabilityName(Capability::PhoneStatus), QStringLiteral("phoneStatus"));
+    QCOMPARE(capabilityName(Capability::FindPhone), QStringLiteral("findPhone"));
+    QCOMPARE(capabilityName(Capability::ShareText), QStringLiteral("shareText"));
+
+    QCOMPARE(Message::typeName(MessageType::PhoneStatusRequest),
+             QStringLiteral("phoneStatusRequest"));
+    QCOMPARE(Message::typeName(MessageType::PhoneStatus), QStringLiteral("phoneStatus"));
+    QCOMPARE(Message::typeName(MessageType::FindPhone), QStringLiteral("findPhone"));
+    QCOMPARE(Message::typeName(MessageType::FindPhoneResult), QStringLiteral("findPhoneResult"));
+    QCOMPARE(Message::typeName(MessageType::ShareText), QStringLiteral("shareText"));
+
+    // The reading is nested whole under "status", like the dashboard's.
+    QJsonObject battery{{"level", 50}};
+    const QJsonObject report = QJsonDocument::fromJson(
+        Message::phoneStatus(4, QJsonObject{{"battery", battery}}).toJson()).object();
+    QCOMPARE(report.value(QLatin1StringView("status")).toObject()
+                 .value(QLatin1StringView("battery")).toObject()
+                 .value(QLatin1StringView("level")).toInt(), 50);
+
+    const QJsonObject ring =
+        QJsonDocument::fromJson(Message::findPhone(5, true).toJson()).object();
+    QCOMPARE(ring.value(QLatin1StringView("ring")).toBool(), true);
+
+    const QJsonObject answer = QJsonDocument::fromJson(
+        Message::findPhoneResult(6, false, QStringLiteral("off")).toJson()).object();
+    QCOMPARE(answer.value(QLatin1StringView("ringing")).toBool(), false);
+    QCOMPARE(answer.value(QLatin1StringView("error")).toString(), QStringLiteral("off"));
+
+    const QJsonObject text = QJsonDocument::fromJson(
+        Message::shareText(7, QStringLiteral("a\nb")).toJson()).object();
+    QCOMPARE(text.value(QLatin1StringView("text")).toString(), QStringLiteral("a\nb"));
 }
 
 QTEST_MAIN(TestInterop)

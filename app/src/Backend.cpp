@@ -4,6 +4,7 @@
 #include "mazeconnect/core/Limits.h"
 
 #include <QClipboard>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -85,13 +86,30 @@ Backend::Backend(QObject *parent) : QObject(parent), m_manager(dataDirectory()) 
                 emit securityAlert(summary, detail);
             });
 
-    // ---- Dashboard ------------------------------------------------------
-    connect(m_manager.statusProvider(), &StatusProvider::snapshotReady, this,
-            [this](const QJsonObject &snapshot) {
-                m_systemStatus = snapshot.toVariantMap();
-                m_systemStatusError.clear();
-                emit systemStatusChanged();
+    // ---- Phones ---------------------------------------------------------
+    connect(&m_manager, &DeviceManager::phoneStatusReceived, this, &Backend::onPhoneStatus);
+    connect(&m_manager, &DeviceManager::textShared, this, &Backend::onTextShared);
+    connect(&m_manager, &DeviceManager::deviceReady, this, [this](const QString &deviceId) {
+        // The first reading as soon as the phone can be asked, rather than at
+        // the next tick — a dashboard that fills in a minute after the phone
+        // connects looks broken for that minute.
+        m_manager.requestPhoneStatus(deviceId);
+        emit phonesChanged();
+    });
+    connect(&m_manager, &DeviceManager::findPhoneAnswered, this,
+            [this](const QString &deviceId, bool ringing, const QString &error) {
+                PhoneState &phone = m_phoneStates[deviceId];
+                phone.ringing = ringing;
+                phone.ringNotice = error;
+                if (!error.isEmpty()) {
+                    setStatus(tr("%1: %2").arg(deviceName(deviceId), error));
+                }
+                emit phonesChanged();
             });
+
+    m_phonePoll.setTimerType(Qt::VeryCoarseTimer);
+    connect(&m_phonePoll, &QTimer::timeout, this, &Backend::refreshPhones);
+    updatePhonePollInterval();
     // ---- maze-guard -----------------------------------------------------
     connect(m_manager.guardBridge(), &GuardBridge::statusReady, this,
             [this](const QMap<GuardDevice, GuardState> &states) {
@@ -173,17 +191,9 @@ Backend::Backend(QObject *parent) : QObject(parent), m_manager(dataDirectory()) 
                 emit commandFinished(id, exitCode, output);
             });
 
-    connect(m_manager.statusProvider(), &StatusProvider::snapshotFailed, this,
-            [this](const QString &reason) {
-                // The last good snapshot is deliberately left in place. A
-                // transient failure should not blank a panel the user is
-                // reading; the reason appears beside it instead.
-                m_systemStatusError = reason;
-                emit systemStatusChanged();
-            });
-
     // ---- Activity + transfer bookkeeping --------------------------------
     connect(&m_manager, &DeviceManager::deviceListChanged, this, &Backend::devicesChanged);
+    connect(&m_manager, &DeviceManager::deviceListChanged, this, &Backend::phonesChanged);
     connect(&m_manager, &DeviceManager::deviceConnected, this,
             [this](const QString &deviceId) {
                 m_activity.append(ActivityLog::Info, tr("Connected"), deviceName(deviceId));
@@ -192,7 +202,15 @@ Backend::Backend(QObject *parent) : QObject(parent), m_manager(dataDirectory()) 
     connect(&m_manager, &DeviceManager::deviceDisconnected, this,
             [this](const QString &deviceId) {
                 m_activity.append(ActivityLog::Info, tr("Disconnected"), deviceName(deviceId));
+                // The last reading stays — "82% a minute ago" is still worth
+                // showing for a phone that just walked out of Wi-Fi range —
+                // but it can no longer be ringing as far as this side knows.
+                auto it = m_phoneStates.find(deviceId);
+                if (it != m_phoneStates.end()) {
+                    it->ringing = false;
+                }
                 emit devicesChanged();
+                emit phonesChanged();
             });
     connect(&m_manager, &DeviceManager::fileOffered, this,
             [this](const PendingFileOffer &offer) {
@@ -363,8 +381,243 @@ bool Backend::hasCapability(const QString &deviceId, const QString &capability) 
     return device.isValid() && device.enabledCapabilities.testFlag(cap);
 }
 
-void Backend::refreshSystemStatus() {
-    m_manager.statusProvider()->request();
+// ---- Phones --------------------------------------------------------------
+
+namespace {
+
+/// An http(s) link and nothing else: no whitespace, strict parse, a host.
+/// Anything that fails is treated as plain text — copied, never opened.
+QUrl webLink(const QString &text) {
+    const QString trimmed = text.trimmed();
+    if (trimmed.isEmpty() || trimmed.size() > 2048) {
+        return {};
+    }
+    for (const QChar c : trimmed) {
+        if (c.isSpace()) {
+            return {};
+        }
+    }
+    const QUrl url(trimmed, QUrl::StrictMode);
+    if (!url.isValid() || url.host().isEmpty()) {
+        return {};
+    }
+    const QString scheme = url.scheme().toLower();
+    if (scheme != QLatin1StringView("http") && scheme != QLatin1StringView("https")) {
+        return {};
+    }
+    return url;
+}
+
+/// One line of preview: newlines folded, long text cut with an ellipsis.
+QString preview(const QString &text, int maxChars = 80) {
+    QString line = text.simplified();
+    if (line.size() > maxChars) {
+        line = line.left(maxChars - 1) + QChar(0x2026);
+    }
+    return line;
+}
+
+constexpr int kLowBatteryPercent = 15;
+constexpr int kLowBatteryResetPercent = 20;
+constexpr int kPollVisibleMs = 5000;
+constexpr int kPollHiddenMs = 60000;
+
+} // namespace
+
+QVariantList Backend::phones() const {
+    QVariantList list;
+    for (const PairedDevice &device : m_manager.pairedDevices()) {
+        // Computers are paired with each other too; only phones have a
+        // battery reading to show.
+        if (device.deviceType == QLatin1StringView("desktop")) {
+            continue;
+        }
+        const PhoneState state = m_phoneStates.value(device.deviceId);
+        QVariantMap entry;
+        entry.insert(QStringLiteral("deviceId"), device.deviceId);
+        entry.insert(QStringLiteral("name"), device.deviceName);
+        entry.insert(QStringLiteral("connected"), m_manager.isConnected(device.deviceId));
+        entry.insert(QStringLiteral("status"), state.status);
+        entry.insert(QStringLiteral("error"), state.error);
+        entry.insert(QStringLiteral("updatedMs"), static_cast<double>(state.updatedMs));
+        entry.insert(QStringLiteral("ringing"), state.ringing);
+        entry.insert(QStringLiteral("ringNotice"), state.ringNotice);
+        entry.insert(QStringLiteral("canStatus"),
+                     m_manager.allows(device.deviceId, Capability::PhoneStatus));
+        entry.insert(QStringLiteral("canRing"),
+                     m_manager.allows(device.deviceId, Capability::FindPhone));
+        entry.insert(QStringLiteral("canOpen"),
+                     m_manager.allows(device.deviceId, Capability::OpenOnPhone));
+        entry.insert(QStringLiteral("canFiles"),
+                     m_manager.allows(device.deviceId, Capability::FileTransfer));
+        list.append(entry);
+    }
+    return list;
+}
+
+QString Backend::phoneSummary() const {
+    QStringList parts;
+    for (const PairedDevice &device : m_manager.pairedDevices()) {
+        if (device.deviceType == QLatin1StringView("desktop")
+            || !m_manager.isConnected(device.deviceId)) {
+            continue;
+        }
+        const QVariantMap status = m_phoneStates.value(device.deviceId).status;
+        if (status.contains(QStringLiteral("batteryLevel"))) {
+            parts << tr("%1 · %2%%3")
+                         .arg(device.deviceName)
+                         .arg(status.value(QStringLiteral("batteryLevel")).toInt())
+                         .arg(status.value(QStringLiteral("charging")).toBool()
+                                  ? tr(" charging") : QString());
+        } else {
+            parts << device.deviceName;
+        }
+    }
+    return parts.join(QStringLiteral("\n"));
+}
+
+void Backend::setDashboardVisible(bool visible) {
+    if (m_dashboardVisible == visible) {
+        return;
+    }
+    m_dashboardVisible = visible;
+    updatePhonePollInterval();
+    if (visible) {
+        refreshPhones();
+    }
+    emit dashboardVisibleChanged();
+}
+
+void Backend::updatePhonePollInterval() {
+    // Fast only while someone is looking. In the background the reading is
+    // for the tray tooltip and the low-battery warning, and a battery does
+    // not fall far in a minute.
+    m_phonePoll.start(m_dashboardVisible ? kPollVisibleMs : kPollHiddenMs);
+}
+
+void Backend::refreshPhones() {
+    for (const PairedDevice &device : m_manager.pairedDevices()) {
+        if (m_manager.isConnected(device.deviceId)) {
+            m_manager.requestPhoneStatus(device.deviceId);
+        }
+    }
+}
+
+void Backend::onPhoneStatus(const QString &deviceId, const QVariantMap &status,
+                            const QString &error) {
+    PhoneState &phone = m_phoneStates[deviceId];
+    if (!error.isEmpty()) {
+        // The previous reading stays on screen, with the reason beside it.
+        phone.error = error;
+        emit phonesChanged();
+        return;
+    }
+    phone.status = status;
+    phone.error.clear();
+    phone.updatedMs = QDateTime::currentMSecsSinceEpoch();
+
+    const bool hasLevel = status.contains(QStringLiteral("batteryLevel"));
+    const int level = status.value(QStringLiteral("batteryLevel")).toInt();
+    const bool charging = status.value(QStringLiteral("charging")).toBool();
+    const QString name = deviceName(deviceId);
+
+    if (hasLevel) {
+        // Once per discharge: re-armed only by charging or by climbing back
+        // clear of the threshold, so a phone hovering at 15% is not announced
+        // every minute.
+        if (!charging && level <= kLowBatteryPercent && !phone.lowBatteryNotified) {
+            phone.lowBatteryNotified = true;
+            emit notificationRequested(tr("%1 battery low").arg(name),
+                                       tr("%1% left — time to charge it.").arg(level), QUrl());
+            m_activity.append(ActivityLog::Info, tr("Battery low"),
+                              tr("%1 · %2%").arg(name).arg(level));
+        } else if (charging || level >= kLowBatteryResetPercent) {
+            phone.lowBatteryNotified = false;
+        }
+
+        if (charging && level >= 100 && !phone.fullNotified && phone.lastLevel >= 0
+            && phone.lastLevel < 100) {
+            phone.fullNotified = true;
+            emit notificationRequested(tr("%1 is fully charged").arg(name),
+                                       tr("You can unplug it."), QUrl());
+        } else if (!charging || level < 95) {
+            phone.fullNotified = false;
+        }
+        phone.lastLevel = level;
+    }
+    emit phonesChanged();
+}
+
+void Backend::onTextShared(const QString &deviceId, const QString &text) {
+    const QString name = deviceName(deviceId);
+    QGuiApplication::clipboard()->setText(text);
+
+    const QUrl link = webLink(text);
+    m_activity.append(ActivityLog::Transfer,
+                      link.isValid() ? tr("Link from %1").arg(name) : tr("Text from %1").arg(name),
+                      preview(text));
+    if (link.isValid()) {
+        // Shown by host first: the part of a link that says where it goes is
+        // the part worth reading before clicking it.
+        emit notificationRequested(tr("Link from %1").arg(name),
+                                   tr("%1\nCopied. Click to open %2.")
+                                       .arg(preview(link.toDisplayString(), 120), link.host()),
+                                   link);
+    } else {
+        emit notificationRequested(tr("Text from %1").arg(name),
+                                   tr("%1\nCopied to the clipboard.").arg(preview(text)), QUrl());
+    }
+    setStatus(tr("Copied what %1 shared.").arg(name));
+}
+
+void Backend::ringPhone(const QString &deviceId) {
+    if (!m_manager.ringPhone(deviceId, true)) {
+        setStatus(tr("%1 cannot be rung right now.").arg(deviceName(deviceId)));
+        return;
+    }
+    PhoneState &phone = m_phoneStates[deviceId];
+    phone.ringNotice.clear();
+    m_activity.append(ActivityLog::Info, tr("Ringing"), deviceName(deviceId));
+    setStatus(tr("Ringing %1…").arg(deviceName(deviceId)));
+    emit phonesChanged();
+}
+
+void Backend::stopRinging(const QString &deviceId) {
+    m_manager.ringPhone(deviceId, false);
+}
+
+int Backend::ringAllPhones() {
+    int asked = 0;
+    for (const PairedDevice &device : m_manager.pairedDevices()) {
+        if (m_manager.allows(device.deviceId, Capability::FindPhone)) {
+            ringPhone(device.deviceId);
+            ++asked;
+        }
+    }
+    if (asked == 0) {
+        setStatus(tr("No phone that can ring is linked right now."));
+        emit notificationRequested(tr("Maze Connect"),
+                                   tr("No phone that can ring is linked right now."), QUrl());
+    }
+    return asked;
+}
+
+bool Backend::sendClipboardTo(const QString &deviceId) {
+    const QString text = QGuiApplication::clipboard()->text();
+    if (text.isEmpty()) {
+        setStatus(tr("Clipboard is empty."));
+        return false;
+    }
+    if (text.size() > limits::kMaxOpenTextChars) {
+        setStatus(tr("Clipboard text is too long to send."));
+        return false;
+    }
+    if (!m_manager.sendOpenOnPhone(deviceId, text)) {
+        setStatus(tr("%1 is not reachable right now.").arg(deviceName(deviceId)));
+        return false;
+    }
+    setStatus(tr("Sent to %1.").arg(deviceName(deviceId)));
+    return true;
 }
 
 // ---- maze-guard ------------------------------------------------------------

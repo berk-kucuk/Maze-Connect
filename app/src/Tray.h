@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QObject>
+#include <QUrl>
 
 class QQuickWindow;
 class QSystemTrayIcon;
@@ -37,8 +38,23 @@ public:
     /// phone connected" without opening anything.
     void setConnectedCount(int count);
 
+    /// Add the linked phones and their battery to the tooltip.
+    void setPhoneSummary(const QString &summary);
+
+    /**
+     * Raise a desktop notification. When @p url is set a click on the
+     * notification opens it — the only way a link from a phone is ever
+     * opened, so nothing reaches the browser without a person choosing it.
+     */
+    void notify(const QString &title, const QString &body, const QUrl &url);
+
 private:
     void toggleWindow();
+    void updateToolTip();
+
+    int m_connectedCount = 0;
+    QString m_phoneSummary;
+    QUrl m_pendingUrl;
 
     QQuickWindow *m_window = nullptr;
     QSystemTrayIcon *m_icon = nullptr;

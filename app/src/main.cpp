@@ -61,6 +61,10 @@ int main(int argc, char *argv[]) {
             QObject::connect(backend, &Backend::devicesChanged, tray, [tray, backend] {
                 tray->setConnectedCount(backend->connectedCount());
             });
+            QObject::connect(backend, &Backend::phonesChanged, tray, [tray, backend] {
+                tray->setPhoneSummary(backend->phoneSummary());
+            });
+            QObject::connect(backend, &Backend::notificationRequested, tray, &Tray::notify);
 
         }
 

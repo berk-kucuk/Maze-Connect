@@ -15,6 +15,7 @@ set(MAZECONNECT_TESTS
     tst_guardbridge
     tst_devicemanager
     tst_interop
+    tst_phonelink
 )
 
 foreach(test IN LISTS MAZECONNECT_TESTS)

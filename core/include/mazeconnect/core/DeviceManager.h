@@ -7,6 +7,7 @@
 #include <QQueue>
 #include <QSet>
 #include <QTimer>
+#include <QVariantMap>
 
 #include <memory>
 
@@ -202,6 +203,30 @@ public:
      */
     bool sendOpenOnPhone(const QString &text);
 
+    /// The same, to one named device rather than the first that will take it.
+    bool sendOpenOnPhone(const QString &deviceId, const QString &text);
+
+    /**
+     * Ask a paired phone for its battery/storage/network reading.
+     *
+     * The answer arrives as phoneStatusReceived(). As with a dashboard
+     * snapshot, only a reading this side asked for is accepted: being paired
+     * does not by itself entitle a phone to put content on this screen.
+     */
+    bool requestPhoneStatus(const QString &deviceId);
+
+    /**
+     * Start (@p ring true) or stop ringing a paired phone.
+     *
+     * The phone answers with findPhoneAnswered(), and says so again when the
+     * person holding it silences it — which is how the ringing state here
+     * stays honest without polling.
+     */
+    bool ringPhone(const QString &deviceId, bool ring);
+
+    /// Whether a connected device may use @p capability right now.
+    bool allows(const QString &deviceId, Capability capability) const;
+
 signals:
     void deviceListChanged();
     void deviceConnected(const QString &deviceId);
@@ -241,6 +266,30 @@ signals:
                               const QString &error);
 
     void securityAlert(const QString &summary, const QString &detail);
+
+    /**
+     * A paired device said hello over a trusted link, so its capabilities are
+     * now known. deviceConnected() fires before that — asking a device for
+     * anything capability-gated has to wait for this one.
+     */
+    void deviceReady(const QString &deviceId);
+
+    /**
+     * A phone answered requestPhoneStatus(). @p status is already validated
+     * (see phonestatus::sanitize); @p error is non-empty when the phone had
+     * no reading to give, in which case @p status is empty.
+     */
+    void phoneStatusReceived(const QString &deviceId, const QVariantMap &status,
+                             const QString &error);
+
+    /// Whether @p deviceId is ringing now, and why not if it refused.
+    void findPhoneAnswered(const QString &deviceId, bool ringing, const QString &error);
+
+    /**
+     * A phone sent text for this computer's clipboard. Bounded and free of
+     * disallowed control characters; what to do with it is the UI's call.
+     */
+    void textShared(const QString &deviceId, const QString &text);
 
 private slots:
     void onIncomingConnection(mazeconnect::core::Connection *connection);
@@ -372,6 +421,17 @@ private:
         int count = 0;
     };
     QHash<QString, RateWindow> m_mediaCommandRate;
+
+    /// Shared texts per device, for the clipboard flood limit.
+    QHash<QString, RateWindow> m_shareTextRate;
+    bool allowShareText(const QString &deviceId);
+
+    /// Phones we asked for a reading and have not heard back from.
+    QSet<QString> m_phoneStatusAwaiting;
+
+    /// Phones we asked to ring (or to stop) whose answers we will take. Kept
+    /// while a phone rings, so its "silenced by hand" notice is accepted.
+    QSet<QString> m_findPhoneAwaiting;
 
     /// Devices whose statusRequest has not been answered yet.
     QSet<QString> m_statusRequesters;

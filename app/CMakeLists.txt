@@ -38,6 +38,8 @@ qt_add_qml_module(maze-connect
     QML_FILES
         qml/Main.qml
         qml/Theme.qml
+        qml/components/BatteryGauge.qml
+        qml/components/Chip.qml
         qml/components/GlassPanel.qml
         qml/components/MazeButton.qml
         qml/components/MazeIcon.qml
@@ -55,6 +57,7 @@ qt_add_qml_module(maze-connect
         qml/views/GuardView.qml
         qml/views/FileOfferOverlay.qml
         qml/views/PairingOverlay.qml
+        qml/views/PhoneCard.qml
         qml/views/SettingsView.qml
         qml/views/TransfersView.qml
 )

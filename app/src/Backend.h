@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QHash>
+#include <QTimer>
+#include <QUrl>
 #include <QObject>
 #include <QQmlEngine>
 #include <QVariantList>
@@ -48,11 +50,27 @@ class Backend : public QObject {
 
     Q_PROPERTY(QString statusMessage READ statusMessage NOTIFY statusMessageChanged)
 
-    // The dashboard's view of this machine. Always the *local* snapshot: a
-    // report from a paired device is peer-supplied data, and nothing here
-    // renders that.
-    Q_PROPERTY(QVariantMap systemStatus READ systemStatus NOTIFY systemStatusChanged)
-    Q_PROPERTY(QString systemStatusError READ systemStatusError NOTIFY systemStatusChanged)
+    /**
+     * Every paired phone, for the dashboard: identity, whether it is linked,
+     * its last validated reading (battery, storage, memory, network, ringer)
+     * and whether it is ringing.
+     *
+     * The dashboard used to show *this* computer's CPU and disk — a reading
+     * of the machine the user was already sitting at. What the desktop cannot
+     * see without help is the phone, so that is what it shows now. This
+     * machine's own snapshot still goes out to phones that ask; it simply is
+     * not drawn here.
+     *
+     * Each entry is a map: deviceId, name, connected (bool), status (map, see
+     * phonestatus::sanitize), error, updatedMs, ringing (bool), ringNotice,
+     * canStatus / canRing / canOpen (bool, what the link allows right now).
+     */
+    Q_PROPERTY(QVariantList phones READ phones NOTIFY phonesChanged)
+
+    /// Set by the dashboard while it is on screen, so the phones are read
+    /// every few seconds then and once a minute otherwise.
+    Q_PROPERTY(bool dashboardVisible READ dashboardVisible WRITE setDashboardVisible
+                   NOTIFY dashboardVisibleChanged)
 
     // No Maze AI surface here on purpose. Maze AI has its own desktop
     // application; what this app adds is reaching that Ollama *from the
@@ -105,8 +123,13 @@ public:
 
     QString statusMessage() const { return m_statusMessage; }
 
-    QVariantMap systemStatus() const { return m_systemStatus; }
-    QString systemStatusError() const { return m_systemStatusError; }
+    QVariantList phones() const;
+
+    bool dashboardVisible() const { return m_dashboardVisible; }
+    void setDashboardVisible(bool visible);
+
+    /// One line for the tray tooltip: the linked phones and their battery.
+    QString phoneSummary() const;
 
     QVariantList guardDevices() const { return m_guardDevices; }
     QString guardError() const { return m_guardError; }
@@ -134,14 +157,21 @@ public slots:
     /// Whether a paired device has a capability enabled, for the UI toggles.
     bool hasCapability(const QString &deviceId, const QString &capability) const;
 
-    /**
-     * Refresh the dashboard.
-     *
-     * Cheap to call on a timer: StatusProvider serves anything inside its
-     * cache window without running the helper again, so the view can ask as
-     * often as it likes to stay live.
-     */
-    void refreshSystemStatus();
+    /// Ask every linked phone for a fresh reading now.
+    void refreshPhones();
+
+    /// Make a phone ring — loudly, even on silent — so it can be found.
+    void ringPhone(const QString &deviceId);
+
+    /// Stop it again from here.
+    void stopRinging(const QString &deviceId);
+
+    /// Ring every linked phone that allows it, for the tray's "Find my
+    /// phone". Returns how many were asked.
+    int ringAllPhones();
+
+    /// Send this computer's clipboard to one particular phone.
+    bool sendClipboardTo(const QString &deviceId);
 
     /// Re-read every killswitch from the broker.
     void refreshGuard();
@@ -225,7 +255,15 @@ signals:
     void devicesChanged();
     void pairingChanged();
     void statusMessageChanged();
-    void systemStatusChanged();
+    void phonesChanged();
+    void dashboardVisibleChanged();
+
+    /**
+     * Something worth a desktop notification: a phone's battery is low or
+     * full, a phone shared a link. @p url is set only for an http(s) link,
+     * and is what a click on the notification opens — never opened unasked.
+     */
+    void notificationRequested(const QString &title, const QString &body, const QUrl &url);
     void guardChanged();
     void guardBannerChanged();
     void commandsChanged();
@@ -249,8 +287,26 @@ private:
     bool m_pairingAnswered = false;
     QString m_statusMessage;
 
-    QVariantMap m_systemStatus;
-    QString m_systemStatusError;
+    struct PhoneState {
+        QVariantMap status;
+        QString error;
+        qint64 updatedMs = 0;
+        bool ringing = false;
+        QString ringNotice;
+        bool lowBatteryNotified = false;
+        bool fullNotified = false;
+        /// The previous reading's level, -1 before the first. "Fully
+        /// charged" is announced on the climb to 100, never merely because
+        /// the first reading after a restart found the phone already full.
+        int lastLevel = -1;
+    };
+    QHash<QString, PhoneState> m_phoneStates;
+    QTimer m_phonePoll;
+    bool m_dashboardVisible = false;
+
+    void onPhoneStatus(const QString &deviceId, const QVariantMap &status, const QString &error);
+    void onTextShared(const QString &deviceId, const QString &text);
+    void updatePhonePollInterval();
 
     QVariantList m_guardDevices;
     QString m_guardError;
