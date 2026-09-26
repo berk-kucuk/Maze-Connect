@@ -59,6 +59,16 @@ constexpr TypeEntry kTypes[] = {
     {MessageType::FindPhone, "findPhone"},
     {MessageType::FindPhoneResult, "findPhoneResult"},
     {MessageType::ShareText, "shareText"},
+    {MessageType::InputSession, "inputSession"},
+    {MessageType::InputEvent, "inputEvent"},
+    {MessageType::InputState, "inputState"},
+    {MessageType::FolderList, "folderList"},
+    {MessageType::FolderListing, "folderListing"},
+    {MessageType::FolderFetch, "folderFetch"},
+    {MessageType::FolderFetchResult, "folderFetchResult"},
+    {MessageType::ClipboardSync, "clipboardSync"},
+    {MessageType::FolderPreview, "folderPreview"},
+    {MessageType::FolderPreviewResult, "folderPreviewResult"},
 };
 
 bool hasControlCharacters(const QString &s) {
@@ -531,6 +541,100 @@ Message Message::shareText(quint64 counter, const QString &text) {
     QJsonObject body;
     body.insert(QLatin1StringView("text"), text);
     return Message(MessageType::ShareText, counter, body);
+}
+
+Message Message::inputSession(quint64 counter, bool start, const QString &mode) {
+    QJsonObject body;
+    body.insert(QLatin1StringView("start"), start);
+    body.insert(QLatin1StringView("mode"), mode);
+    return Message(MessageType::InputSession, counter, body);
+}
+
+Message Message::inputEvent(quint64 counter, const QJsonObject &event) {
+    return Message(MessageType::InputEvent, counter, event);
+}
+
+Message Message::inputState(quint64 counter, bool active, const QString &mode,
+                            const QString &error, bool pending) {
+    QJsonObject body;
+    body.insert(QLatin1StringView("active"), active);
+    if (pending) {
+        body.insert(QLatin1StringView("pending"), true);
+    }
+    body.insert(QLatin1StringView("mode"), mode);
+    if (!error.isEmpty()) {
+        body.insert(QLatin1StringView("error"), error);
+    }
+    return Message(MessageType::InputState, counter, body);
+}
+
+Message Message::folderList(quint64 counter, quint32 requestId, const QString &path) {
+    QJsonObject body;
+    body.insert(QLatin1StringView("requestId"), static_cast<qint64>(requestId));
+    body.insert(QLatin1StringView("path"), path);
+    return Message(MessageType::FolderList, counter, body);
+}
+
+Message Message::folderListing(quint64 counter, quint32 requestId, const QString &path,
+                               const QJsonArray &entries, const QString &error) {
+    QJsonObject body;
+    body.insert(QLatin1StringView("requestId"), static_cast<qint64>(requestId));
+    body.insert(QLatin1StringView("path"), path);
+    body.insert(QLatin1StringView("entries"), entries);
+    if (!error.isEmpty()) {
+        body.insert(QLatin1StringView("error"), error);
+    }
+    return Message(MessageType::FolderListing, counter, body);
+}
+
+Message Message::folderFetch(quint64 counter, quint32 requestId, const QString &path) {
+    QJsonObject body;
+    body.insert(QLatin1StringView("requestId"), static_cast<qint64>(requestId));
+    body.insert(QLatin1StringView("path"), path);
+    return Message(MessageType::FolderFetch, counter, body);
+}
+
+Message Message::folderFetchResult(quint64 counter, quint32 requestId, quint32 transferId,
+                                   const QString &error) {
+    QJsonObject body;
+    body.insert(QLatin1StringView("requestId"), static_cast<qint64>(requestId));
+    if (error.isEmpty()) {
+        body.insert(QLatin1StringView("transferId"), static_cast<qint64>(transferId));
+    } else {
+        body.insert(QLatin1StringView("error"), error);
+    }
+    return Message(MessageType::FolderFetchResult, counter, body);
+}
+
+Message Message::clipboardSync(quint64 counter, const QString &text) {
+    QJsonObject body;
+    body.insert(QLatin1StringView("text"), text);
+    return Message(MessageType::ClipboardSync, counter, body);
+}
+
+Message Message::folderPreview(quint64 counter, quint32 requestId, const QString &path,
+                               bool large) {
+    QJsonObject body;
+    body.insert(QLatin1StringView("requestId"), static_cast<qint64>(requestId));
+    body.insert(QLatin1StringView("path"), path);
+    body.insert(QLatin1StringView("size"), large ? QStringLiteral("large") : QStringLiteral("thumb"));
+    return Message(MessageType::FolderPreview, counter, body);
+}
+
+Message Message::folderPreviewResult(quint64 counter, quint32 requestId, const QString &path,
+                                     const QByteArray &jpeg, int width, int height,
+                                     const QString &error) {
+    QJsonObject body;
+    body.insert(QLatin1StringView("requestId"), static_cast<qint64>(requestId));
+    body.insert(QLatin1StringView("path"), path);
+    if (error.isEmpty()) {
+        body.insert(QLatin1StringView("data"), QString::fromLatin1(jpeg.toBase64()));
+        body.insert(QLatin1StringView("width"), width);
+        body.insert(QLatin1StringView("height"), height);
+    } else {
+        body.insert(QLatin1StringView("error"), error);
+    }
+    return Message(MessageType::FolderPreviewResult, counter, body);
 }
 
 // ---- Data chunk framing -------------------------------------------------

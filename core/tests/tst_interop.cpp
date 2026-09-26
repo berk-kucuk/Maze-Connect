@@ -42,6 +42,7 @@ private slots:
     void guardMessageShape();
     void mediaMessageShape();
     void phoneMessageShape();
+    void remoteAndFolderMessageShape();
 };
 
 void TestInterop::frameHeaderLayout() {
@@ -241,14 +242,15 @@ void TestInterop::capabilityWireNames() {
     QCOMPARE(capabilityFromName(QString()), Capability::None);
     QCOMPARE(capabilityFromName(QStringLiteral("commands ")), Capability::None);
 
-    // Pairing grants everything this build implements. The two sets are still
-    // distinct concepts — advertising is "I implement this", enabling is "you
-    // may use it" — but they now start equal, because pairing is already the
-    // deliberate act and a second wall in front of every feature only made
-    // the app look broken.
+    // Pairing grants everything this build implements *except* the opt-in
+    // capabilities: advertising is "I implement this", enabling is "you may
+    // use it". Pairing is the deliberate act for everything bounded by a
+    // fixed table or the owner's own file; full remote control is not
+    // bounded that way, so it is the one exception, switched on per device.
     QVERIFY(supportedCapabilities().testFlag(Capability::SystemStatus));
     QVERIFY(defaultEnabledCapabilities().testFlag(Capability::SystemStatus));
-    QCOMPARE(defaultEnabledCapabilities(), supportedCapabilities());
+    QCOMPARE(defaultEnabledCapabilities(), supportedCapabilities() & ~optInCapabilities());
+    QCOMPARE(optInCapabilities(), Capabilities(Capability::RemoteInput));
 
     // Computer -> phone only, but still matched as a string like every
     // other capability, and still granted by pairing like the rest.
@@ -481,6 +483,37 @@ void TestInterop::phoneMessageShape() {
     const QJsonObject text = QJsonDocument::fromJson(
         Message::shareText(7, QStringLiteral("a\nb")).toJson()).object();
     QCOMPARE(text.value(QLatin1StringView("text")).toString(), QStringLiteral("a\nb"));
+}
+
+void TestInterop::remoteAndFolderMessageShape() {
+    // Duplicated in InteropTest.remoteAndFolderMessageShape.
+    QCOMPARE(capabilityName(Capability::RemoteInput), QStringLiteral("remoteInput"));
+    QCOMPARE(capabilityName(Capability::Presenter), QStringLiteral("presenter"));
+    QCOMPARE(capabilityName(Capability::ClipboardSync), QStringLiteral("clipboardSync"));
+    QCOMPARE(capabilityName(Capability::SharedFolder), QStringLiteral("sharedFolder"));
+
+    QCOMPARE(Message::typeName(MessageType::InputSession), QStringLiteral("inputSession"));
+    QCOMPARE(Message::typeName(MessageType::InputEvent), QStringLiteral("inputEvent"));
+    QCOMPARE(Message::typeName(MessageType::InputState), QStringLiteral("inputState"));
+    QCOMPARE(Message::typeName(MessageType::FolderList), QStringLiteral("folderList"));
+    QCOMPARE(Message::typeName(MessageType::FolderListing), QStringLiteral("folderListing"));
+    QCOMPARE(Message::typeName(MessageType::FolderFetch), QStringLiteral("folderFetch"));
+    QCOMPARE(Message::typeName(MessageType::FolderFetchResult),
+             QStringLiteral("folderFetchResult"));
+    QCOMPARE(Message::typeName(MessageType::ClipboardSync), QStringLiteral("clipboardSync"));
+    QCOMPARE(Message::typeName(MessageType::FolderPreview), QStringLiteral("folderPreview"));
+    QCOMPARE(Message::typeName(MessageType::FolderPreviewResult),
+             QStringLiteral("folderPreviewResult"));
+
+    const QJsonObject event = QJsonDocument::fromJson(
+        Message::inputEvent(2, QJsonObject{{"kind", "move"}, {"dx", 3.5}, {"dy", -1}}).toJson())
+        .object();
+    QCOMPARE(event.value(QLatin1StringView("kind")).toString(), QStringLiteral("move"));
+    QCOMPARE(event.value(QLatin1StringView("dx")).toDouble(), 3.5);
+
+    // Full control is never a default.
+    QVERIFY(!defaultEnabledCapabilities().testFlag(Capability::RemoteInput));
+    QVERIFY(defaultEnabledCapabilities().testFlag(Capability::Presenter));
 }
 
 QTEST_MAIN(TestInterop)

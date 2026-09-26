@@ -19,6 +19,10 @@ constexpr Entry kEntries[] = {
     {Capability::PhoneStatus, "phoneStatus"},
     {Capability::FindPhone, "findPhone"},
     {Capability::ShareText, "shareText"},
+    {Capability::RemoteInput, "remoteInput"},
+    {Capability::Presenter, "presenter"},
+    {Capability::ClipboardSync, "clipboardSync"},
+    {Capability::SharedFolder, "sharedFolder"},
 };
 
 } // namespace

@@ -4,6 +4,8 @@
 #include "mazeconnect/core/Limits.h"
 
 #include <QClipboard>
+#include <QDesktopServices>
+#include <QMimeData>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -12,6 +14,8 @@
 #include <QHostAddress>
 #include <QHostInfo>
 #include <QNetworkInterface>
+#include <QProcess>
+#include <QSettings>
 #include <QUrl>
 
 using namespace mazeconnect::core;
@@ -106,6 +110,96 @@ Backend::Backend(QObject *parent) : QObject(parent), m_manager(dataDirectory()) 
                 }
                 emit phonesChanged();
             });
+
+    // ---- Remote control ---------------------------------------------------
+    connect(&m_manager, &DeviceManager::remoteInputChanged, this,
+            [this](const QString &deviceId, bool active, const QString &mode,
+                   const QString &error) {
+                const QString name = deviceName(deviceId);
+                if (active) {
+                    const bool started = m_remoteController != deviceId;
+                    m_remoteController = deviceId;
+                    m_remoteControlMode = mode;
+                    if (started) {
+                        // Every session is announced and logged: this is the
+                        // one feature that can do anything a keyboard can.
+                        m_activity.append(ActivityLog::Security,
+                                          mode == QLatin1StringView("full")
+                                              ? tr("%1 is controlling this computer").arg(name)
+                                              : tr("%1 is presenting").arg(name),
+                                          mode == QLatin1StringView("full")
+                                              ? tr("mouse and keyboard")
+                                              : tr("slide keys only"));
+                        emit notificationRequested(
+                            mode == QLatin1StringView("full")
+                                ? tr("%1 is controlling this computer").arg(name)
+                                : tr("%1 is presenting").arg(name),
+                            tr("Stop it any time from the Maze Connect window."), QUrl());
+                    }
+                } else if (m_remoteController == deviceId) {
+                    m_remoteController.clear();
+                    m_remoteControlMode.clear();
+                    m_activity.append(ActivityLog::Security, tr("Remote control ended"),
+                                      error.isEmpty() ? name : tr("%1 — %2").arg(name, error));
+                } else if (!error.isEmpty()) {
+                    setStatus(tr("%1: %2").arg(name, error));
+                }
+                emit remoteControlChanged();
+                emit phonesChanged();
+            });
+
+    connect(&m_manager, &DeviceManager::remoteInputApprovalRequested, this,
+            [this](const QString &deviceId, const QString &name) {
+                m_controlRequestDevice = deviceId;
+                m_controlRequestName = deviceName(deviceId).isEmpty() ? name : deviceName(deviceId);
+                emit controlRequestChanged();
+                emit attentionRequested();
+                emit notificationRequested(
+                    tr("%1 wants to use the mouse and keyboard").arg(m_controlRequestName),
+                    tr("Answer in the Maze Connect window."), QUrl());
+                m_activity.append(ActivityLog::Security, tr("Control requested"),
+                                  m_controlRequestName);
+            });
+    connect(&m_manager, &DeviceManager::remoteInputApprovalCleared, this, [this] {
+        m_controlRequestDevice.clear();
+        m_controlRequestName.clear();
+        emit controlRequestChanged();
+    });
+
+    // ---- Clipboard sync ---------------------------------------------------
+    m_clipboardSync = QSettings().value(QStringLiteral("clipboardSync/enabled"), false).toBool();
+    connect(QGuiApplication::clipboard(), &QClipboard::dataChanged, this,
+            &Backend::onLocalClipboardChanged);
+    connect(&m_manager, &DeviceManager::clipboardReceived, this,
+            [this](const QString &deviceId, const QString &text) {
+                if (!m_clipboardSync) {
+                    return;
+                }
+                m_lastRemoteClip = text;
+                QGuiApplication::clipboard()->setText(text);
+                setStatus(tr("Clipboard from %1").arg(deviceName(deviceId)));
+            });
+
+    // ---- Lock when the phone leaves ----------------------------------------
+    {
+        QSettings settings;
+        m_proximityDevice = settings.value(QStringLiteral("proximityLock/deviceId")).toString();
+        m_proximityDelaySec = qBound(10, settings.value(QStringLiteral("proximityLock/delaySec"),
+                                                        30).toInt(), 600);
+    }
+    m_proximityTimer.setSingleShot(true);
+    connect(&m_proximityTimer, &QTimer::timeout, this, &Backend::lockBecausePhoneLeft);
+    connect(&m_manager, &DeviceManager::deviceDisconnected, this, [this](const QString &id) {
+        if (!m_proximityDevice.isEmpty() && id == m_proximityDevice) {
+            m_proximityTimer.start(m_proximityDelaySec * 1000);
+        }
+    });
+    connect(&m_manager, &DeviceManager::deviceConnected, this, [this](const QString &id) {
+        // Back before the delay ran out: a blip, not a departure.
+        if (id == m_proximityDevice) {
+            m_proximityTimer.stop();
+        }
+    });
 
     m_phonePoll.setTimerType(Qt::VeryCoarseTimer);
     connect(&m_phonePoll, &QTimer::timeout, this, &Backend::refreshPhones);
@@ -450,6 +544,11 @@ QVariantList Backend::phones() const {
                      m_manager.allows(device.deviceId, Capability::OpenOnPhone));
         entry.insert(QStringLiteral("canFiles"),
                      m_manager.allows(device.deviceId, Capability::FileTransfer));
+        // The stored switch, not the link: shown and changeable while the
+        // phone is away too.
+        entry.insert(QStringLiteral("controlAllowed"),
+                     device.enabledCapabilities.testFlag(Capability::RemoteInput));
+        entry.insert(QStringLiteral("controlling"), m_remoteController == device.deviceId);
         list.append(entry);
     }
     return list;
@@ -600,6 +699,162 @@ int Backend::ringAllPhones() {
                                    tr("No phone that can ring is linked right now."), QUrl());
     }
     return asked;
+}
+
+// ---- Remote control, clipboard sync, shared folder ---------------------------
+
+void Backend::stopRemoteControl() {
+    m_manager.stopRemoteInput();
+}
+
+void Backend::answerControlRequest(int answer) {
+    const QString deviceId = m_controlRequestDevice;
+    if (deviceId.isEmpty()) {
+        return;
+    }
+    const auto choice = answer == 2 ? DeviceManager::InputApproval::Always
+                      : answer == 1 ? DeviceManager::InputApproval::Once
+                      : DeviceManager::InputApproval::Deny;
+    m_activity.append(ActivityLog::Security,
+                      choice == DeviceManager::InputApproval::Deny ? tr("Control declined")
+                      : choice == DeviceManager::InputApproval::Once
+                          ? tr("Control allowed once")
+                          : tr("Control allowed always"),
+                      deviceName(deviceId));
+    m_manager.answerRemoteInput(deviceId, choice);
+    if (choice == DeviceManager::InputApproval::Always) {
+        emit phonesChanged();
+    }
+}
+
+void Backend::setRemoteControlAllowed(const QString &deviceId, bool allowed) {
+    if (!m_manager.setCapabilityEnabled(deviceId, Capability::RemoteInput, allowed)) {
+        return;
+    }
+    m_activity.append(ActivityLog::Security,
+                      allowed ? tr("Mouse and keyboard control allowed")
+                              : tr("Mouse and keyboard control revoked"),
+                      deviceName(deviceId));
+    emit phonesChanged();
+}
+
+void Backend::setClipboardSync(bool enabled) {
+    if (m_clipboardSync == enabled) {
+        return;
+    }
+    m_clipboardSync = enabled;
+    QSettings().setValue(QStringLiteral("clipboardSync/enabled"), enabled);
+    emit clipboardSyncChanged();
+}
+
+void Backend::onLocalClipboardChanged() {
+    if (!m_clipboardSync) {
+        return;
+    }
+    const QMimeData *mime = QGuiApplication::clipboard()->mimeData();
+    if (mime == nullptr || !mime->hasText()) {
+        return;
+    }
+    // Password managers mark what they copy (KeePassXC, KWallet via Klipper);
+    // a secret is never sent anywhere, whatever the switch says.
+    if (mime->data(QStringLiteral("x-kde-passwordManagerHint")) == "secret") {
+        return;
+    }
+    const QString text = mime->text();
+    if (text.isEmpty() || text == m_lastRemoteClip) {
+        return; // our own echo of what a phone just sent
+    }
+    m_lastRemoteClip.clear();
+    m_manager.sendClipboard(text);
+}
+
+QString Backend::sharedFolderPath() const {
+    return m_manager.sharedFolder().root();
+}
+
+void Backend::openSharedFolder() {
+    m_manager.sharedFolder().ensureExists();
+    QDesktopServices::openUrl(QUrl::fromLocalFile(m_manager.sharedFolder().root()));
+}
+
+// ---- Lock when the phone leaves --------------------------------------------
+
+void Backend::setProximityLockDevice(const QString &deviceId) {
+    // Only a paired device can be chosen — an id from QML that names nothing
+    // would arm a lock that can never fire, which reads as a broken switch.
+    if (!deviceId.isEmpty() && !m_manager.store().deviceForId(deviceId).isValid()) {
+        return;
+    }
+    if (m_proximityDevice == deviceId) {
+        return;
+    }
+    m_proximityDevice = deviceId;
+    m_proximityTimer.stop();
+    QSettings().setValue(QStringLiteral("proximityLock/deviceId"), deviceId);
+    m_activity.append(ActivityLog::Security,
+                      deviceId.isEmpty() ? tr("Lock when phone leaves: off")
+                                         : tr("Lock when phone leaves: on"),
+                      deviceId.isEmpty() ? QString() : deviceName(deviceId));
+    emit proximityLockChanged();
+}
+
+void Backend::setProximityLockDelay(int seconds) {
+    seconds = qBound(10, seconds, 600);
+    if (m_proximityDelaySec == seconds) {
+        return;
+    }
+    m_proximityDelaySec = seconds;
+    QSettings().setValue(QStringLiteral("proximityLock/delaySec"), seconds);
+    emit proximityLockChanged();
+}
+
+void Backend::lockBecausePhoneLeft() {
+    if (m_proximityDevice.isEmpty() || m_manager.isConnected(m_proximityDevice)) {
+        return;
+    }
+    // A fixed argv, no shell: the only thing this can do is lock the session
+    // it runs in. Nothing about it is chosen by a phone — the phone's only
+    // influence is being absent.
+    const bool started = QProcess::startDetached(QStringLiteral("loginctl"),
+                                                 {QStringLiteral("lock-session")});
+    m_activity.append(ActivityLog::Security,
+                      started ? tr("Locked: %1 left").arg(deviceName(m_proximityDevice))
+                              : tr("Could not lock the session"),
+                      started ? tr("not seen for %1 s").arg(m_proximityDelaySec)
+                              : tr("loginctl could not be started"));
+}
+
+bool Backend::sendTextTo(const QString &deviceId, const QString &text) {
+    const QString trimmed = text.trimmed();
+    if (trimmed.isEmpty()) {
+        setStatus(tr("Nothing to send."));
+        return false;
+    }
+    if (trimmed.size() > limits::kMaxOpenTextChars) {
+        setStatus(tr("That is too long to send — the limit is %1 characters.")
+                      .arg(limits::kMaxOpenTextChars));
+        return false;
+    }
+    // The phone reads this with Message.text(): ordinary whitespace is fine,
+    // other controls and bidi overrides are refused there. Refuse them here
+    // too, so the send is not silently dropped on arrival.
+    for (const QChar c : trimmed) {
+        const char16_t u = c.unicode();
+        const bool whitespace = u == u'\t' || u == u'\n' || u == u'\r';
+        if ((!whitespace && (u < 0x20 || u == 0x7F || (u >= 0x80 && u <= 0x9F)))
+            || (u >= 0x202A && u <= 0x202E) || (u >= 0x2066 && u <= 0x2069)) {
+            setStatus(tr("That text contains control characters the phone will not accept."));
+            return false;
+        }
+    }
+    if (!m_manager.sendOpenOnPhone(deviceId, trimmed)) {
+        setStatus(tr("%1 is not reachable right now.").arg(deviceName(deviceId)));
+        return false;
+    }
+    m_activity.append(ActivityLog::Transfer, tr("Text to %1").arg(deviceName(deviceId)),
+                      preview(trimmed));
+    setStatus(tr("Sent to %1.").arg(deviceName(deviceId)));
+    return true;
 }
 
 bool Backend::sendClipboardTo(const QString &deviceId) {

@@ -67,6 +67,39 @@ class Backend : public QObject {
      */
     Q_PROPERTY(QVariantList phones READ phones NOTIFY phonesChanged)
 
+    /**
+     * Lock this computer when a chosen phone leaves.
+     *
+     * Opt-in, off by default: the id of the phone to watch, or empty. When
+     * that phone's link drops and it has not come back within
+     * proximityLockDelay seconds, the session is locked — the delay rides out
+     * a Wi-Fi blip, which the heartbeat already takes up to 45 s to notice.
+     * It can only ever *lock*: nothing a phone does can unlock anything.
+     */
+    Q_PROPERTY(QString proximityLockDevice READ proximityLockDevice
+                   WRITE setProximityLockDevice NOTIFY proximityLockChanged)
+    Q_PROPERTY(int proximityLockDelay READ proximityLockDelay WRITE setProximityLockDelay
+                   NOTIFY proximityLockChanged)
+
+    /// The device controlling this computer's pointer/keyboard, or empty;
+    /// and in which mode ("presenter" / "full"). Drives the banner that
+    /// stays on screen for as long as it lasts.
+    Q_PROPERTY(QString remoteController READ remoteController NOTIFY remoteControlChanged)
+    Q_PROPERTY(QString remoteControlMode READ remoteControlMode NOTIFY remoteControlChanged)
+
+    /// A phone asking for full control, waiting for this computer's owner.
+    Q_PROPERTY(QString controlRequestDevice READ controlRequestDevice
+                   NOTIFY controlRequestChanged)
+    Q_PROPERTY(QString controlRequestName READ controlRequestName NOTIFY controlRequestChanged)
+
+    /// Clipboard sync with linked phones — this computer's half of it.
+    /// Off by default; the phone has its own switch.
+    Q_PROPERTY(bool clipboardSync READ clipboardSync WRITE setClipboardSync
+                   NOTIFY clipboardSyncChanged)
+
+    /// The one folder phones may browse (~/Maze Connect Shared).
+    Q_PROPERTY(QString sharedFolderPath READ sharedFolderPath CONSTANT)
+
     /// Set by the dashboard while it is on screen, so the phones are read
     /// every few seconds then and once a minute otherwise.
     Q_PROPERTY(bool dashboardVisible READ dashboardVisible WRITE setDashboardVisible
@@ -131,6 +164,25 @@ public:
     /// One line for the tray tooltip: the linked phones and their battery.
     QString phoneSummary() const;
 
+    QString controlRequestDevice() const { return m_controlRequestDevice; }
+    QString controlRequestName() const { return m_controlRequestName; }
+
+    /// A paired device's name, for QML. (deviceName() is also the name of
+    /// the property holding this computer's own name, which hides the
+    /// overload from QML — calling it there fails.)
+    Q_INVOKABLE QString nameOf(const QString &deviceId) const { return deviceName(deviceId); }
+
+    QString remoteController() const { return m_remoteController; }
+    QString remoteControlMode() const { return m_remoteControlMode; }
+    bool clipboardSync() const { return m_clipboardSync; }
+    void setClipboardSync(bool enabled);
+    QString sharedFolderPath() const;
+
+    QString proximityLockDevice() const { return m_proximityDevice; }
+    void setProximityLockDevice(const QString &deviceId);
+    int proximityLockDelay() const { return m_proximityDelaySec; }
+    void setProximityLockDelay(int seconds);
+
     QVariantList guardDevices() const { return m_guardDevices; }
     QString guardError() const { return m_guardError; }
     bool guardAvailable() const;
@@ -170,8 +222,27 @@ public slots:
     /// phone". Returns how many were asked.
     int ringAllPhones();
 
+    /// End whatever remote-control session is running, from this computer.
+    void stopRemoteControl();
+
+    /// Answer the open control request: 0 deny, 1 allow once, 2 always.
+    void answerControlRequest(int answer);
+
+    /// Let (or stop letting) one phone move the pointer and type. Opt-in.
+    void setRemoteControlAllowed(const QString &deviceId, bool allowed);
+
+    /// Open the shared folder in the file manager, creating it if needed.
+    void openSharedFolder();
+
     /// Send this computer's clipboard to one particular phone.
     bool sendClipboardTo(const QString &deviceId);
+
+    /**
+     * Send a typed note or link to one phone. Refused here, with a reason,
+     * for exactly what the phone would refuse — too long, or control
+     * characters other than tab and newline — so a send never vanishes.
+     */
+    bool sendTextTo(const QString &deviceId, const QString &text);
 
     /// Re-read every killswitch from the broker.
     void refreshGuard();
@@ -257,6 +328,12 @@ signals:
     void statusMessageChanged();
     void phonesChanged();
     void dashboardVisibleChanged();
+    void proximityLockChanged();
+    void remoteControlChanged();
+    void controlRequestChanged();
+    /// Something needs an answer at this computer: show the window.
+    void attentionRequested();
+    void clipboardSyncChanged();
 
     /**
      * Something worth a desktop notification: a phone's battery is low or
@@ -303,6 +380,19 @@ private:
     QHash<QString, PhoneState> m_phoneStates;
     QTimer m_phonePoll;
     bool m_dashboardVisible = false;
+
+    QString m_controlRequestDevice;
+    QString m_controlRequestName;
+    QString m_remoteController;
+    QString m_remoteControlMode;
+    bool m_clipboardSync = false;
+    QString m_lastRemoteClip; ///< what a phone put on the clipboard, not to echo back
+    void onLocalClipboardChanged();
+
+    QString m_proximityDevice;
+    int m_proximityDelaySec = 30;
+    QTimer m_proximityTimer;
+    void lockBecausePhoneLeft();
 
     void onPhoneStatus(const QString &deviceId, const QVariantMap &status, const QString &error);
     void onTextShared(const QString &deviceId, const QString &text);

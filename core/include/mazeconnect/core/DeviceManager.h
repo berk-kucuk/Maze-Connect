@@ -9,6 +9,7 @@
 #include <QTimer>
 #include <QVariantMap>
 
+#include <functional>
 #include <memory>
 
 #include "mazeconnect/core/Beacon.h"
@@ -20,6 +21,8 @@
 #include "mazeconnect/core/GuardBridge.h"
 #include "mazeconnect/core/Identity.h"
 #include "mazeconnect/core/MediaBridge.h"
+#include "mazeconnect/core/RemoteInput.h"
+#include "mazeconnect/core/SharedFolder.h"
 #include "mazeconnect/core/Server.h"
 #include "mazeconnect/core/StatusProvider.h"
 
@@ -227,6 +230,34 @@ public:
     /// Whether a connected device may use @p capability right now.
     bool allows(const QString &deviceId, Capability capability) const;
 
+    /// Send this computer's clipboard to every linked device that syncs.
+    int sendClipboard(const QString &text);
+
+    /// The one folder phones may browse. Shared with the UI.
+    const SharedFolder &sharedFolder() const { return m_shared; }
+
+    /// Remote input — who is driving, and a way to end it from here.
+    RemoteInput *remoteInput() { return m_input.get(); }
+    void stopRemoteInput();
+
+    /// How the computer's owner answered a phone asking for full control.
+    enum class InputApproval { Deny, Once, Always };
+    Q_ENUM(InputApproval)
+
+    /**
+     * Answer the pending request from @p deviceId. Once grants this one
+     * session and nothing after it; Always switches the capability on for
+     * that device. Either starts the session straight away, so the phone does
+     * not have to ask again.
+     */
+    void answerRemoteInput(const QString &deviceId, InputApproval answer);
+
+    /**
+     * For tests: replace the input backend (takes ownership). The portal one
+     * needs a desktop session, which a test run does not have.
+     */
+    void setInputBackendForTesting(InputBackend *backend);
+
 signals:
     void deviceListChanged();
     void deviceConnected(const QString &deviceId);
@@ -290,6 +321,19 @@ signals:
      * disallowed control characters; what to do with it is the UI's call.
      */
     void textShared(const QString &deviceId, const QString &text);
+
+    /// A device is (or is no longer) controlling this computer's input.
+    /// @p mode is "presenter" or "full".
+    void remoteInputChanged(const QString &deviceId, bool active, const QString &mode,
+                            const QString &error);
+
+    /// A phone asked for full control and is not allowed it: ask the owner.
+    void remoteInputApprovalRequested(const QString &deviceId, const QString &deviceName);
+    /// That question is no longer open — answered, timed out, or gone.
+    void remoteInputApprovalCleared();
+
+    /// A device's clipboard changed; bounded and cleaned like shareText.
+    void clipboardReceived(const QString &deviceId, const QString &text);
 
 private slots:
     void onIncomingConnection(mazeconnect::core::Connection *connection);
@@ -424,6 +468,30 @@ private:
 
     /// Shared texts per device, for the clipboard flood limit.
     QHash<QString, RateWindow> m_shareTextRate;
+    QHash<QString, RateWindow> m_clipboardRate;
+    QHash<QString, RateWindow> m_folderRate;
+    QHash<QString, RateWindow> m_previewRate;
+    /// Previews being decoded per device, so one phone cannot fill the pool.
+    QHash<QString, int> m_previewsInFlight;
+    bool allowWindow(QHash<QString, RateWindow> &table, const QString &deviceId, int max,
+                     int windowMs);
+
+    std::unique_ptr<RemoteInput> m_input;
+
+    /// The one device waiting for the owner's answer, and for how long.
+    QString m_inputApprovalPending;
+    QTimer m_inputApprovalTimer;
+    /// A device allowed for the current session only ("Allow once").
+    QString m_inputOnceGrant;
+    bool fullInputAllowed(const Link &link) const;
+    void clearInputApproval();
+    SharedFolder m_shared;
+
+    /// Queue a file offer; @p beforeOffer runs with the id before the offer
+    /// is sent. 0 when refused.
+    quint32 offerFile(const QString &deviceId, const QString &localPath,
+                      const std::function<void(quint32)> &beforeOffer = {});
+    void wireRemoteInput();
     bool allowShareText(const QString &deviceId);
 
     /// Phones we asked for a reading and have not heard back from.

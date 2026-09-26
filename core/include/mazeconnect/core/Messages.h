@@ -51,6 +51,16 @@ enum class MessageType {
     FindPhone,      ///< computer -> phone: start or stop ringing
     FindPhoneResult,///< phone -> computer: whether it is ringing now, or why not
     ShareText,      ///< phone -> computer: text or a link for the clipboard
+    InputSession,   ///< phone -> computer: start/stop controlling, in a mode
+    InputEvent,     ///< phone -> computer: one pointer/key/text event
+    InputState,     ///< computer -> phone: whether it is controlling now, or why not
+    FolderList,     ///< phone -> computer: list one folder of the shared folder
+    FolderListing,  ///< computer -> phone: its entries, or why not
+    FolderFetch,    ///< phone -> computer: send me this file from the shared folder
+    FolderFetchResult, ///< computer -> phone: the transfer id that is coming, or why not
+    ClipboardSync,  ///< either way: the sender's clipboard changed
+    FolderPreview,  ///< phone -> computer: a small picture of this shared file
+    FolderPreviewResult, ///< computer -> phone: that picture (JPEG), or why not
 };
 
 /**
@@ -300,6 +310,25 @@ public:
 
     /// Built by the phone; here so tests can make it.
     static Message shareText(quint64 counter, const QString &text);
+
+    static Message inputSession(quint64 counter, bool start, const QString &mode);
+    /// @p event carries kind + its fields; see docs/PROTOCOL.md § remoteInput.
+    static Message inputEvent(quint64 counter, const QJsonObject &event);
+    /// @p pending: not active yet, waiting for the computer's owner to answer.
+    static Message inputState(quint64 counter, bool active, const QString &mode,
+                              const QString &error, bool pending = false);
+    static Message folderList(quint64 counter, quint32 requestId, const QString &path);
+    static Message folderListing(quint64 counter, quint32 requestId, const QString &path,
+                                 const QJsonArray &entries, const QString &error);
+    static Message folderFetch(quint64 counter, quint32 requestId, const QString &path);
+    static Message folderFetchResult(quint64 counter, quint32 requestId, quint32 transferId,
+                                     const QString &error);
+    static Message clipboardSync(quint64 counter, const QString &text);
+    static Message folderPreview(quint64 counter, quint32 requestId, const QString &path,
+                                 bool large);
+    static Message folderPreviewResult(quint64 counter, quint32 requestId, const QString &path,
+                                       const QByteArray &jpeg, int width, int height,
+                                       const QString &error);
 
     static QString typeName(MessageType type);
     static MessageType typeFromName(const QString &name);

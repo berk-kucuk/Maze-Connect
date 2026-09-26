@@ -16,12 +16,16 @@ set(MAZECONNECT_TESTS
     tst_devicemanager
     tst_interop
     tst_phonelink
+    tst_remotecontrol
 )
 
 foreach(test IN LISTS MAZECONNECT_TESTS)
     add_executable(${test} ${test}.cpp)
     target_link_libraries(${test} PRIVATE mazeconnect-core Qt6::Test)
     add_test(NAME ${test} COMMAND ${test})
+    # Core links QtGui (image previews), which makes QTEST_MAIN a GUI app;
+    # a build machine has no display, so every test runs offscreen.
+    set_tests_properties(${test} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endforeach()
 
 # The media bridge talks to MPRIS players over D-Bus, so its test registers a
@@ -36,3 +40,4 @@ if(DBUS_RUN_SESSION)
 else()
     add_test(NAME tst_mediabridge COMMAND tst_mediabridge)
 endif()
+set_tests_properties(tst_mediabridge PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

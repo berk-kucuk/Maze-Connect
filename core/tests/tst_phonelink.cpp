@@ -6,6 +6,7 @@
 #include <QJsonObject>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include <QImage>
 
 #include "mazeconnect/core/Connection.h"
 #include "mazeconnect/core/DeviceManager.h"
@@ -38,6 +39,14 @@ private slots:
     void sharedTextIsGatedAndRateLimited();
     void sharedTextRefusesMisleadingCharacters();
     void findPhoneResultsNeedARing();
+
+    void fullControlIsOptIn();
+    void theComputerIsAskedAndOnceMeansOnce();
+    void presenterRunsAndStopsOnRevoke();
+    void sharedFolderOverTheLink();
+    void clipboardSyncIsGated();
+
+    void initTestCase();
 
 private:
     struct Harness {
@@ -89,8 +98,9 @@ std::unique_ptr<TestPhoneLink::Harness> TestPhoneLink::link(const QStringList &e
     h->phoneIdentity = Identity::generate(QStringLiteral("phone"));
 
     // The pairing record, written the way DeviceStore writes one.
+    // What a real pairing grants: everything except the opt-in ones.
     const QStringList caps = enabled.isEmpty()
-        ? capabilitiesToNames(supportedCapabilities())
+        ? capabilitiesToNames(defaultEnabledCapabilities())
         : enabled;
     QJsonObject record{
         {"deviceId", QString::fromLatin1(kPhoneId)},
@@ -138,6 +148,38 @@ std::unique_ptr<TestPhoneLink::Harness> TestPhoneLink::link(const QStringList &e
         return nullptr;
     }
     return h;
+}
+
+namespace {
+
+class FakeBackend : public InputBackend {
+public:
+    int keys = 0;
+    bool active = false;
+    void start() override { active = true; emit started(true, QString()); }
+    void stop() override { active = false; }
+    bool isActive() const override { return active; }
+    void pointerMotion(double, double) override {}
+    void pointerButton(int, bool) override {}
+    void pointerScroll(int, int) override {}
+    void keysym(int, bool) override { ++keys; }
+};
+
+QTemporaryDir *sharedDir() {
+    static QTemporaryDir dir;
+    return &dir;
+}
+
+template <typename Pred>
+bool received(const QList<Message> &list, Pred pred) {
+    return std::any_of(list.cbegin(), list.cend(), pred);
+}
+
+} // namespace
+
+void TestPhoneLink::initTestCase() {
+    // Every DeviceManager here reads its shared folder from this.
+    qputenv("MAZECONNECT_SHARED_DIR", sharedDir()->filePath("shared").toUtf8());
 }
 
 // ---- The sanitiser ---------------------------------------------------------
@@ -317,6 +359,214 @@ void TestPhoneLink::findPhoneResultsNeedARing() {
     QVERIFY(h->computer->setCapabilityEnabled(QString::fromLatin1(kPhoneId),
                                               Capability::FindPhone, false));
     QVERIFY(!h->computer->ringPhone(QString::fromLatin1(kPhoneId), true));
+}
+
+void TestPhoneLink::fullControlIsOptIn() {
+    auto h = link();
+    QVERIFY(h);
+    auto *backend = new FakeBackend;
+    h->computer->setInputBackendForTesting(backend);
+
+    // Straight out of pairing: no mouse and keyboard.
+    h->send(Message::inputSession(h->next(), true, QStringLiteral("full")));
+    QTRY_VERIFY_WITH_TIMEOUT(received(h->received, [](const Message &m) {
+        return m.type() == MessageType::InputState && !m.boolean(QLatin1StringView("active"))
+            && !m.string(QLatin1StringView("error"), 300).isEmpty();
+    }), 3000);
+    QVERIFY(!backend->active);
+    h->send(Message::inputEvent(h->next(), QJsonObject{{"kind", "key"}, {"key", "enter"}}));
+    QTest::qWait(200);
+    QCOMPARE(backend->keys, 0);
+
+    // The owner switches it on, on the computer: now it runs.
+    QVERIFY(h->computer->setCapabilityEnabled(QString::fromLatin1(kPhoneId),
+                                              Capability::RemoteInput, true));
+    h->received.clear();
+    h->send(Message::inputSession(h->next(), true, QStringLiteral("full")));
+    QTRY_VERIFY_WITH_TIMEOUT(received(h->received, [](const Message &m) {
+        return m.type() == MessageType::InputState && m.boolean(QLatin1StringView("active"));
+    }), 3000);
+    h->send(Message::inputEvent(h->next(), QJsonObject{{"kind", "key"}, {"key", "enter"}}));
+    QTRY_COMPARE_WITH_TIMEOUT(backend->keys, 2, 3000);
+
+    // An older pairing record is not granted it by the migration either.
+    QVERIFY(!defaultEnabledCapabilities().testFlag(Capability::RemoteInput));
+}
+
+void TestPhoneLink::theComputerIsAskedAndOnceMeansOnce() {
+    auto h = link();
+    QVERIFY(h);
+    auto *backend = new FakeBackend;
+    h->computer->setInputBackendForTesting(backend);
+    QSignalSpy asked(h->computer.get(), &DeviceManager::remoteInputApprovalRequested);
+    const QString phone = QString::fromLatin1(kPhoneId);
+
+    // Not allowed: the phone is told to wait, and the owner is asked.
+    h->send(Message::inputSession(h->next(), true, QStringLiteral("full")));
+    QTRY_COMPARE_WITH_TIMEOUT(asked.count(), 1, 3000);
+    QTRY_VERIFY_WITH_TIMEOUT(received(h->received, [](const Message &m) {
+        return m.type() == MessageType::InputState && m.boolean(QLatin1StringView("pending"));
+    }), 3000);
+    QVERIFY(!backend->active);
+
+    // An answer for some other device changes nothing.
+    h->computer->answerRemoteInput(QStringLiteral("someone-else"),
+                                   DeviceManager::InputApproval::Always);
+    QVERIFY(!backend->active);
+
+    // Allow once: it runs now, without the phone asking again...
+    h->computer->answerRemoteInput(phone, DeviceManager::InputApproval::Once);
+    QTRY_VERIFY_WITH_TIMEOUT(backend->active, 3000);
+    h->send(Message::inputEvent(h->next(), QJsonObject{{"kind", "key"}, {"key", "enter"}}));
+    QTRY_COMPARE_WITH_TIMEOUT(backend->keys, 2, 3000);
+    // ...and the capability itself was not switched on.
+    QVERIFY(!h->computer->allows(phone, Capability::RemoteInput));
+
+    // Once means once: after the session ends, the next one asks again.
+    h->computer->stopRemoteInput();
+    QTRY_VERIFY_WITH_TIMEOUT(!backend->active, 3000);
+    h->send(Message::inputSession(h->next(), true, QStringLiteral("full")));
+    QTRY_COMPARE_WITH_TIMEOUT(asked.count(), 2, 3000);
+    QVERIFY(!backend->active);
+
+    // Deny: refused, and nothing starts.
+    h->received.clear();
+    h->computer->answerRemoteInput(phone, DeviceManager::InputApproval::Deny);
+    QTRY_VERIFY_WITH_TIMEOUT(received(h->received, [](const Message &m) {
+        return m.type() == MessageType::InputState && !m.boolean(QLatin1StringView("active"))
+            && !m.boolean(QLatin1StringView("pending"));
+    }), 3000);
+    QVERIFY(!backend->active);
+    // A stale answer after the question closed does nothing either.
+    h->computer->answerRemoteInput(phone, DeviceManager::InputApproval::Always);
+    QTest::qWait(200);
+    QVERIFY(!backend->active);
+    QVERIFY(!h->computer->allows(phone, Capability::RemoteInput));
+}
+
+void TestPhoneLink::presenterRunsAndStopsOnRevoke() {
+    auto h = link();
+    QVERIFY(h);
+    auto *backend = new FakeBackend;
+    h->computer->setInputBackendForTesting(backend);
+    QSignalSpy changed(h->computer.get(), &DeviceManager::remoteInputChanged);
+
+    h->send(Message::inputSession(h->next(), true, QStringLiteral("presenter")));
+    QTRY_VERIFY_WITH_TIMEOUT(backend->active, 3000);
+    h->send(Message::inputEvent(h->next(), QJsonObject{{"kind", "key"}, {"key", "right"}}));
+    QTRY_COMPARE_WITH_TIMEOUT(backend->keys, 2, 3000);
+    // Presenter cannot type.
+    h->send(Message::inputEvent(h->next(), QJsonObject{{"kind", "text"}, {"text", "id"}}));
+    QTest::qWait(200);
+    QCOMPARE(backend->keys, 2);
+
+    // Revoked on the computer mid-session: it ends at once.
+    QVERIFY(h->computer->setCapabilityEnabled(QString::fromLatin1(kPhoneId),
+                                              Capability::Presenter, false));
+    QTRY_VERIFY_WITH_TIMEOUT(!backend->active, 3000);
+    QVERIFY(!changed.isEmpty());
+    QCOMPARE(changed.last().at(1).toBool(), false);
+}
+
+void TestPhoneLink::sharedFolderOverTheLink() {
+    const QString root = sharedDir()->filePath("shared");
+    QDir().mkpath(root + "/Docs");
+    {
+        QFile f(root + "/Docs/cv.txt");
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("hello");
+    }
+    auto h = link();
+    QVERIFY(h);
+
+    h->send(Message::folderList(h->next(), 7, QStringLiteral("Docs")));
+    QTRY_VERIFY_WITH_TIMEOUT(received(h->received, [](const Message &m) {
+        return m.type() == MessageType::FolderListing
+            && m.integer(QLatin1StringView("requestId"), 100) == 7
+            && m.body().value(QLatin1StringView("entries")).toArray().size() == 1;
+    }), 3000);
+
+    // Out of the folder: an error, and no entries.
+    h->send(Message::folderList(h->next(), 8, QStringLiteral("../..")));
+    QTRY_VERIFY_WITH_TIMEOUT(received(h->received, [](const Message &m) {
+        return m.type() == MessageType::FolderListing
+            && m.integer(QLatin1StringView("requestId"), 100) == 8
+            && !m.string(QLatin1StringView("error"), 300).isEmpty()
+            && m.body().value(QLatin1StringView("entries")).toArray().isEmpty();
+    }), 3000);
+
+    // A fetch: the result names the transfer, and the offer that follows is it.
+    h->send(Message::folderFetch(h->next(), 9, QStringLiteral("Docs/cv.txt")));
+    QTRY_VERIFY_WITH_TIMEOUT(received(h->received, [](const Message &m) {
+        return m.type() == MessageType::FileOffer;
+    }), 3000);
+    qint64 promised = -1;
+    qint64 offered = -2;
+    int resultIndex = -1;
+    int offerIndex = -1;
+    for (int i = 0; i < h->received.size(); ++i) {
+        const Message &m = h->received.at(i);
+        if (m.type() == MessageType::FolderFetchResult) {
+            promised = m.integer(QLatin1StringView("transferId"), 0xFFFFFFFFLL);
+            resultIndex = i;
+        } else if (m.type() == MessageType::FileOffer) {
+            offered = m.integer(QLatin1StringView("transferId"), 0xFFFFFFFFLL);
+            offerIndex = i;
+        }
+    }
+    QCOMPARE(promised, offered);
+    QVERIFY(resultIndex >= 0 && resultIndex < offerIndex);
+
+    // A preview of a picture comes back as a JPEG; a path out does not.
+    {
+        QImage img(640, 480, QImage::Format_RGB32);
+        img.fill(Qt::blue);
+        QVERIFY(img.save(root + "/Docs/pic.png"));
+    }
+    h->send(Message::folderPreview(h->next(), 11, QStringLiteral("Docs/pic.png"), false));
+    QTRY_VERIFY_WITH_TIMEOUT(received(h->received, [](const Message &m) {
+        return m.type() == MessageType::FolderPreviewResult
+            && m.integer(QLatin1StringView("requestId"), 100) == 11
+            && QByteArray::fromBase64(m.body().value(QLatin1StringView("data")).toString().toLatin1())
+                   .startsWith("\xFF\xD8");
+    }), 5000);
+    h->send(Message::folderPreview(h->next(), 12, QStringLiteral("../../etc/passwd"), true));
+    QTRY_VERIFY_WITH_TIMEOUT(received(h->received, [](const Message &m) {
+        return m.type() == MessageType::FolderPreviewResult
+            && m.integer(QLatin1StringView("requestId"), 100) == 12
+            && !m.string(QLatin1StringView("error"), 300).isEmpty()
+            && !m.body().contains(QLatin1StringView("data"));
+    }), 3000);
+
+    // Revoked: refused out loud.
+    QVERIFY(h->computer->setCapabilityEnabled(QString::fromLatin1(kPhoneId),
+                                              Capability::SharedFolder, false));
+    h->send(Message::folderList(h->next(), 10, QString()));
+    QTRY_VERIFY_WITH_TIMEOUT(received(h->received, [](const Message &m) {
+        return m.type() == MessageType::FolderListing
+            && m.integer(QLatin1StringView("requestId"), 100) == 10
+            && !m.string(QLatin1StringView("error"), 300).isEmpty();
+    }), 3000);
+}
+
+void TestPhoneLink::clipboardSyncIsGated() {
+    auto h = link();
+    QVERIFY(h);
+    QSignalSpy clip(h->computer.get(), &DeviceManager::clipboardReceived);
+
+    h->send(Message::clipboardSync(h->next(), QStringLiteral("copied\ntext")));
+    QTRY_COMPARE_WITH_TIMEOUT(clip.count(), 1, 3000);
+    h->send(Message::clipboardSync(h->next(), QString("x") + QChar(0x202e)));
+    QTest::qWait(200);
+    QCOMPARE(clip.count(), 1);
+
+    QVERIFY(h->computer->setCapabilityEnabled(QString::fromLatin1(kPhoneId),
+                                              Capability::ClipboardSync, false));
+    h->send(Message::clipboardSync(h->next(), QStringLiteral("after")));
+    QTest::qWait(300);
+    QCOMPARE(clip.count(), 1);
+    // And nothing goes out to a device that does not sync.
+    QCOMPARE(h->computer->sendClipboard(QStringLiteral("mine")), 0);
 }
 
 QTEST_MAIN(TestPhoneLink)

@@ -216,6 +216,7 @@ Window {
                     anchors.fill: parent
                     visible: root.currentView === 0
                     onOpenDevices: root.currentView = 1
+                    onSendTextRequested: (deviceId, name) => sendText.show(deviceId, name)
                 }
                 DevicesView { anchors.fill: parent; visible: root.currentView === 1 }
                 TransfersView { anchors.fill: parent; visible: root.currentView === 2 }
@@ -241,8 +242,57 @@ Window {
         }
     }
 
+    // While a phone controls this computer, it says so — on top of every
+    // page, for as long as it lasts, with a way to end it. KWin shows its
+    // own indicator too; this one names the phone.
+    Rectangle {
+        id: controlBanner
+        visible: Backend.remoteController !== ""
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 20
+        width: Math.min(parent.width - 60, bannerRow.implicitWidth + 36)
+        height: 50
+        radius: 25
+        color: "#1A1408"
+        border.width: 1
+        border.color: Theme.warn
+        z: 50
+
+        Row {
+            id: bannerRow
+            anchors.centerIn: parent
+            spacing: 12
+
+            MazeIcon {
+                name: "phone"
+                color: Theme.warn
+                width: 18
+                height: 18
+                anchors.verticalCenter: parent.verticalCenter
+            }
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: Backend.remoteControlMode === "full"
+                      ? qsTr("%1 is controlling the mouse and keyboard").arg(Backend.nameOf(Backend.remoteController))
+                      : qsTr("%1 is presenting — slide keys only").arg(Backend.nameOf(Backend.remoteController))
+                color: Theme.text
+                font.family: Theme.fontSans
+                font.pixelSize: 13
+            }
+            MazeButton {
+                anchors.verticalCenter: parent.verticalCenter
+                text: qsTr("Stop")
+                destructive: true
+                onClicked: Backend.stopRemoteControl()
+            }
+        }
+    }
+
+    ControlRequestOverlay {}
     PairingOverlay {}
     FileOfferOverlay { id: fileOffer }
+    SendTextOverlay { id: sendText }
 
     Connections {
         target: Backend

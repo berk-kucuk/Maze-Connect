@@ -96,7 +96,9 @@ bool DeviceStore::load() {
             }
             known = capabilitiesFromNames(knownNames);
         }
-        const Capabilities added = supportedCapabilities() & ~known;
+        // Opt-in capabilities are never granted this way: new to the record
+        // is not the same as chosen by the owner.
+        const Capabilities added = supportedCapabilities() & ~known & ~optInCapabilities();
         if (added) {
             device.enabledCapabilities |= added;
             migrated = true;

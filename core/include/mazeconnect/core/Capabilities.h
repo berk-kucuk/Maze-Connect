@@ -23,6 +23,10 @@ enum class Capability : quint32 {
     PhoneStatus = 0x80,  ///< read a paired phone's battery, storage and network
     FindPhone = 0x100,   ///< make a paired phone ring, even when it is silenced
     ShareText = 0x200,   ///< a phone sends text or a link to this computer's clipboard
+    RemoteInput = 0x400, ///< a phone moves the pointer and types — **opt-in per device**
+    Presenter = 0x800,   ///< a phone presses a fixed handful of slide keys
+    ClipboardSync = 0x1000, ///< clipboards follow each other, when both owners switch it on
+    SharedFolder = 0x2000,  ///< a phone browses and downloads from one shared folder
 };
 Q_DECLARE_FLAGS(Capabilities, Capability)
 Q_DECLARE_OPERATORS_FOR_FLAGS(Capabilities)
@@ -39,7 +43,22 @@ inline constexpr Capabilities supportedCapabilities() {
     return Capabilities(Capability::FileTransfer) | Capability::SystemStatus
         | Capability::Commands | Capability::Ai | Capability::GuardControl
         | Capability::OpenOnPhone | Capability::Media | Capability::PhoneStatus
-        | Capability::FindPhone | Capability::ShareText;
+        | Capability::FindPhone | Capability::ShareText | Capability::RemoteInput
+        | Capability::Presenter | Capability::ClipboardSync | Capability::SharedFolder;
+}
+
+/**
+ * Capabilities that pairing does **not** grant: each has to be switched on
+ * for a device, on this computer, by its owner.
+ *
+ * RemoteInput is the one: a phone that can type can open a terminal and run
+ * anything as this user. Everything else a phone can do here is bounded by a
+ * fixed table or a file the owner wrote; this is not, so it is not a default
+ * — neither for a new pairing nor for an older pairing that has never heard
+ * of it (see DeviceStore::load()).
+ */
+inline constexpr Capabilities optInCapabilities() {
+    return Capabilities(Capability::RemoteInput);
 }
 
 /**
@@ -66,7 +85,7 @@ inline constexpr Capabilities supportedCapabilities() {
  * desktop raises a banner that does not fade.
  */
 inline constexpr Capabilities defaultEnabledCapabilities() {
-    return supportedCapabilities();
+    return supportedCapabilities() & ~optInCapabilities();
 }
 
 /**

@@ -1033,3 +1033,90 @@ telefonla canlı tur yapılmadı — mobil 0.15.0 ile birlikte denenecek.
 
 Sürüm 1.3.0-1. **Mobil 0.15.0 ile birlikte yayınla**; eski mobil sürüm bu
 yetenekleri ilan etmediği için kart "update it to 0.15.0" diyor.
+
+
+---
+
+## 1.4.0 — telefon uzaklaşınca kilitle, sürükle-bırak, telefona not, USB ikonu
+
+- **Telefon uzaklaşınca kilitle** (Ayarlar, varsayılan kapalı). Seçilen
+  telefonun linki düşer ve gecikme içinde (15 sn / 30 sn / 1 dk / 5 dk,
+  QSettings'te) geri gelmezse `loginctl lock-session` — sabit argv, kabuk yok.
+  Yalnızca **kilitleyebilir**: telefonun tek etkisi *yokluğu*, kilit açan hiçbir
+  yol yok. Gecikme Wi-Fi sıçramalarını yutuyor (kalp atışı zaten 45 sn'de
+  fark ediyor). Bu bilgisayarın kendi ağı düşerse de kilitlenir — ayarda
+  yazıyor. Açma/kapama ve her kilitleme Activity'ye yazılıyor.
+- **Sürükle-bırak:** dosyaları telefon kartına bırakınca o telefona teklif
+  gidiyor (telefon yine sorar). Kart kenarı yeşile dönüyor.
+- **Telefona not/link** (*Send text*): pencereyi kaplayan diyalog, Ctrl+Enter
+  gönderir. 4096 karakter ve telefonun `Message.text()` kuralı (tab/LF/CR
+  dışında kontrol karakteri ve bidi override yok) burada da uygulanıyor —
+  telefonda sessizce düşecek bir metin hiç gönderilmiyor.
+- **Guard'da USB ikonu** eksikti (`MazeIcon` setinde "usb" yoktu); aynı
+  24 birimlik ızgarada trident çizildi, mobilde `ic_usb` olarak da var.
+
+Doğrulama: 15/15 ctest, qmllint uyarısız, ekransız çalıştırmada hata yok,
+kart yeni düğmelerle sahte veriyle çizilip kontrol edildi. Kilit gerçek bir
+telefon ayrılışıyla denenmedi.
+
+Sürüm 1.4.0-1.
+
+### 1.4.0 — ikinci tur: uzaktan kontrol, sunum, pano senkronu, paylaşılan klasör
+
+Kullanıcı ilk turda "özellik eklenmemiş" dedi — haklıydı, eklenenler küçüktü.
+Bu tur istenen dört özellik (bildirim yansıtma Play Protect yüzünden, ekran
+görüntüsü Wayland yüzünden kapsam dışı):
+
+- **Uzaktan fare/klavye** (`remoteInput`) — `RemoteInput` +
+  `PortalInputBackend`: xdg-desktop-portal **RemoteDesktop** (KDE, v2) ile,
+  yalnızca klavye+işaretçi, ekran yakalama yok. İlk oturumda KDE'nin kendi
+  izin penceresi bilgisayarın ekranında çıkar; `persist_mode=2` + restore
+  token (QSettings) ile iptal edilene kadar hatırlanır. `org.freedesktop.host.
+  portal.Registry.Register("maze-connect")` ile uygulama kimliği bildiriliyor.
+  - **`optInCapabilities()`**: eşleşme bunu vermiyor, DeviceStore göçü de eski
+    kayıtlara eklemiyor; Ayarlar'da telefon başına Allow/Revoke.
+  - Tuşlar **adla** geliyor (sabit tablo), keysym numarası asla. Hareket ±400,
+    kaydırma ±20, metin 256 karakter ve kontrol/bidi karakteri varsa tamamen
+    reddediliyor, saniyede 240 olay, tek cihaz, 2 dk hareketsizlikte bitiyor,
+    yetki her olayda yeniden kontrol ediliyor. Oturum boyunca pencerede
+    solmayan bant + *Stop*, başlangıçta bildirim ve Activity kaydı.
+- **Sunum** (`presenter`, varsayılan açık): yalnızca left/right/pageUp/
+  pageDown/home/end/f5/escape/blank, tap, modifier yok.
+- **Pano senkronu** (`clipboardSync`): Ayarlar'da anahtar, varsayılan kapalı;
+  `x-kde-passwordManagerHint=secret` gönderilmiyor; yankı bastırılıyor.
+- **Paylaşılan klasör** (`sharedFolder`): `~/Maze Connect Shared` (0700).
+  `SharedFolder::resolve` önce metinsel (mutlak, `\`, `.`, `..`, gizli, kontrol
+  karakteri, derinlik/uzunluk), sonra diskte (her bileşende symlink reddi +
+  canonical kök kontrolü). `folderFetchResult` teklif **öncesinde** gidiyor.
+
+Testler: yeni `tst_remotecontrol` (11: klasör kaçışları, symlink, sunum
+kısıtları, sınırlar, metin, tek cihaz, sel) — sunum kısıtı ve iki klasör
+kontrolü mutasyonla kapatılınca düşüyor. `tst_phonelink` +4 (opt-in, sunum
+iptali, klasör sırası, pano kapısı). **16/16 ctest.** Portal gerçek oturumda
+denenmedi: ilk *Start*'ta KDE izin penceresi beklenir.
+
+## 1.4.1 — kontrol isteği bilgisayarda soruluyor; resim önizlemeleri
+
+**Bildirilen:** Remote'ta Touchpad/Keyboard *Start*'a basınca hemen yine
+*Start* geliyordu. **Sebep (günlükten):** telefon 22:12'de yeniden
+eşleştirilmişti; yeni eşleşmede `remoteInput` verilmediği için istek
+reddediliyordu. Ret mesajı ayarın yeri için "Devices" diyordu (doğrusu
+Settings) ve telefonda soluk gri metinde kalıyordu. 22:13:36'da açılan oturum
+sunum moduydu. Ayrıca uyarı bandı `Backend.deviceName(...)` çağrısında
+patlıyordu: aynı adlı özellik fonksiyonu QML'den gizliyordu → `nameOf()`.
+
+**Yeni akış:** izinsiz tam kontrol isteği artık **bilgisayarda soruluyor**
+(`ControlRequestOverlay`: Deny / Allow once / Always allow; pencere tepsiden
+öne geliyor, bildirim de çıkıyor). Telefona `inputState {pending: true}`
+gidiyor; cevap oturumu telefon tekrar istemeden başlatıyor. "Once" tek oturum
+sürüyor (`m_inputOnceGrant`, oturum bitince siliniyor), bir dakika cevapsız
+kalırsa ret, aynı anda tek soru, kapanmış soruya verilen cevap etkisiz.
+`tst_phonelink::theComputerIsAskedAndOnceMeansOnce`.
+
+**Önizleme:** `Thumbnailer` (core artık QtGui'ye bağlı → testler
+`QT_QPA_PLATFORM=offscreen` ile koşuyor, makepkg `check()` ekransız).
+`folderPreview`/`folderPreviewResult` iş parçacığı havuzunda çözülüyor;
+resim tekliflerine `thumbnail` ekleniyor. Biçim içerikten, boyut/piksel
+sınırı, ölçekli çözme, allocation limit, 280 KiB JPEG bütçesi. Testler:
+`previewsAreSmallJpegs`, `previewsRefuseWhatIsNotAPicture` ve link üzerinden
+önizleme/kaçış. **16/16 ctest.**

@@ -85,6 +85,14 @@ int main(int argc, char *argv[]) {
         // rounded panel or the corners read as bright squares.
         WindowEffects::applyBlur(window, 22);
 
+        // A question that needs answering here (a phone asking for control)
+        // brings the window forward even from the tray: the prompt is in it.
+        QObject::connect(backend, &Backend::attentionRequested, window, [window]() {
+            window->show();
+            window->raise();
+            window->requestActivate();
+        });
+
         QObject::connect(&instance, &SingleInstance::raiseRequested, window, [window]() {
             window->show();
             window->raise();

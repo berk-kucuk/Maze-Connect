@@ -144,6 +144,10 @@ identity.
 | `phoneStatus` | on — the phone owner can switch it off | `phoneStatusRequest` → `phoneStatus` (computer asks, phone answers) |
 | `findPhone` | on — the phone owner can switch it off | `findPhone` → `findPhoneResult`* (computer → phone) |
 | `shareText` | on | `shareText` (phone → computer only) |
+| `remoteInput` | **off — opt-in per device on the computer** | `inputSession` → `inputState`*, `inputEvent` |
+| `presenter` | on | `inputSession` (mode `presenter`) → `inputState`*, `inputEvent` (slide keys only) |
+| `clipboardSync` | on, but each side's owner switch starts off | `clipboardSync` (both ways) |
+| `sharedFolder` | on | `folderList` → `folderListing`, `folderFetch` → `folderFetchResult` + a `fileOffer` |
 
 Every capability is granted by pairing and revocable per device on the
 computer. A message is only ever sent to a peer that advertised the
@@ -305,6 +309,96 @@ are dropped, so a phone cannot keep overwriting the clipboard.
 The computer puts the text on its clipboard and raises a notification. An
 http(s) link is **opened only if the user clicks that notification** — a
 paired phone can offer a link, never open one.
+
+## remoteInput and presenter
+
+The phone moves the computer's pointer and types (`full`), or presses a fixed
+handful of slide keys (`presenter`). The computer injects through the desktop's
+RemoteDesktop portal only: the first session shows the desktop's own consent
+dialog on the computer's screen, and the consent is remembered until revoked
+in System Settings.
+
+```json
+{ "v": 4, "t": "inputSession", "c": 3, "start": true, "mode": "full" }
+{ "v": 4, "t": "inputState", "c": 9, "active": true, "mode": "full" }
+{ "v": 4, "t": "inputEvent", "c": 4, "kind": "move", "dx": 12.5, "dy": -3 }
+{ "v": 4, "t": "inputEvent", "c": 5, "kind": "button", "button": "left", "action": "click" }
+{ "v": 4, "t": "inputEvent", "c": 6, "kind": "scroll", "dy": -1 }
+{ "v": 4, "t": "inputEvent", "c": 7, "kind": "key", "key": "c", "action": "tap", "mods": ["ctrl"] }
+{ "v": 4, "t": "inputEvent", "c": 8, "kind": "text", "text": "hello" }
+```
+
+* `remoteInput` is the one capability pairing does **not** grant
+  (`optInCapabilities()`): a phone that can type can open a terminal. It is
+  switched on per device on the computer, and never added to an older
+  pairing by the capability migration.
+* A key is a **name** from a fixed table (`escape`, `enter`, `left`, `f5`,
+  `volumeUp`, single letters and digits…) — never a keysym number. Modifiers
+  are `ctrl`, `alt`, `shift`, `super`.
+* Presenter mode accepts only `kind: key`, `action: tap`, no modifiers, and
+  only `left`, `right`, `pageUp`, `pageDown`, `home`, `end`, `f5`,
+  `escape`, `blank`.
+* Motion is clamped to ±400 per event, scroll to ±20 steps, text to 256
+  characters and refused whole if it holds control characters other than tab
+  and newline, or bidi overrides. At most 240 events a second get through.
+* A phone that is not allowed full control is not simply refused: the
+  computer asks its owner (Deny / Allow once / Always allow) and answers
+  `inputState` with `pending: true` meanwhile. The answer starts the session
+  without the phone asking again; "once" lasts exactly one session; no
+  answer within a minute is a refusal.
+* One device at a time. A session ends after two minutes without input,
+  when the link drops, when the capability is revoked (checked per event),
+  or from the computer's Stop button; `inputState` with `active: false` says
+  so. The computer shows a banner for as long as a session lasts.
+
+## clipboardSync
+
+```json
+{ "v": 4, "t": "clipboardSync", "c": 12, "text": "copied text" }
+```
+
+Sent by either side when its clipboard changes and **its owner's switch** is
+on; applied by the receiver only if **its** switch is on too. Read with
+`text()` like `shareText`; 16 384 characters; five per device per ten
+seconds. Text a password manager marked secret (`x-kde-passwordManagerHint`
+on the desktop, `EXTRA_IS_SENSITIVE` on Android) is never sent. Android lets
+an app read its clipboard only while focused, so a phone sends when Maze
+Connect is opened.
+
+## sharedFolder
+
+One folder on the computer (`~/Maze Connect Shared`), and nothing else.
+
+```json
+{ "v": 4, "t": "folderList", "c": 5, "requestId": 7, "path": "Photos/2026" }
+{ "v": 4, "t": "folderListing", "c": 11, "requestId": 7, "path": "Photos/2026",
+  "entries": [ { "name": "a.jpg", "dir": false, "size": 204800, "mtime": 1790000000000 } ] }
+{ "v": 4, "t": "folderFetch", "c": 6, "requestId": 8, "path": "Photos/2026/a.jpg" }
+{ "v": 4, "t": "folderFetchResult", "c": 12, "requestId": 8, "transferId": 31 }
+{ "v": 4, "t": "fileOffer", "c": 13, "transferId": 31, "filename": "a.jpg", "size": 204800 }
+```
+
+`path` is relative, `/`-separated. The computer refuses absolute paths,
+backslashes, empty, `.` and `..` segments, hidden names, control characters,
+more than 32 levels or 1024 characters; any symlink on the way; and any
+result whose canonical path is outside the folder. Listings leave out hidden
+files, symlinks and special files, 500 entries at most.
+
+`folderPreview {requestId, path, size: "thumb"|"large"}` asks for a picture
+of one image file; `folderPreviewResult` carries it as base64 JPEG (`data`,
+`width`, `height`) or an `error`. The format is decided from the file's
+content, files over 60 MB or 120 MP are not decoded, the decoder is asked for
+the reduced size directly and capped by an allocation limit, and the JPEG is
+kept under 280 KiB (160 px thumbnails, 1280 px large). At most 60 previews
+per device per ten seconds and four decoding at once. A `fileOffer` for a
+picture may carry the same kind of preview as `thumbnail` (480 px); older
+peers ignore the field. The phone accepts a preview only as bounded, strictly
+decoded base64 of a JPEG no larger than 2048 px on either edge.
+
+A fetch answers with `folderFetchResult` **before** the `fileOffer`, on the
+same ordered link. The phone accepts an offer without prompting only if its
+id was promised that way, by that computer, for a fetch it made; every other
+offer still asks.
 
 ## Scope
 

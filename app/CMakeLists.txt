@@ -52,12 +52,14 @@ qt_add_qml_module(maze-connect
         qml/components/WindowButton.qml
         qml/views/ActivityView.qml
         qml/views/CommandsView.qml
+        qml/views/ControlRequestOverlay.qml
         qml/views/DashboardView.qml
         qml/views/DevicesView.qml
         qml/views/GuardView.qml
         qml/views/FileOfferOverlay.qml
         qml/views/PairingOverlay.qml
         qml/views/PhoneCard.qml
+        qml/views/SendTextOverlay.qml
         qml/views/SettingsView.qml
         qml/views/TransfersView.qml
 )

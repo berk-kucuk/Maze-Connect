@@ -23,6 +23,8 @@ Item {
 
     /// Asks Main.qml to switch to the Devices page (pairing lives there).
     signal openDevices()
+    /// Asks Main.qml to open the send-text dialog, which covers the window.
+    signal sendTextRequested(string deviceId, string name)
 
     readonly property var phones: Backend.phones
     readonly property int linkedCount: {
@@ -101,7 +103,7 @@ Item {
             width: parent.width
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WordWrap
-            text: qsTr("Pair your phone to see its battery, storage and network here, ring it when it is lost, and send files and links both ways.")
+            text: qsTr("Pair your phone to see its battery, storage and network here, ring it when it is lost, send files and links both ways, and lock this computer when the phone leaves.")
             color: Theme.dim
             font.family: Theme.fontSans
             font.pixelSize: 13
@@ -162,6 +164,7 @@ Item {
                     height: implicitHeight
                     phone: modelData
                     now: root.now
+                    onSendTextRequested: (deviceId, name) => root.sendTextRequested(deviceId, name)
                     onSendFileRequested: (deviceId) => {
                         fileDialog.deviceId = deviceId
                         fileDialog.open()

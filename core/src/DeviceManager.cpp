@@ -1,5 +1,6 @@
 #include "mazeconnect/core/DeviceManager.h"
 #include "mazeconnect/core/PhoneStatus.h"
+#include "mazeconnect/core/Thumbnailer.h"
 
 #include "mazeconnect/core/Limits.h"
 #include "mazeconnect/core/PathSanitizer.h"
@@ -16,6 +17,8 @@
 #include <QFileInfo>
 #include <QRandomGenerator>
 #include <QStandardPaths>
+#include <QPointer>
+#include <QThreadPool>
 #include <QUuid>
 
 #include <utility>
@@ -64,6 +67,23 @@ DeviceManager::DeviceManager(QString dataDir, QObject *parent)
     qRegisterMetaType<PendingFileOffer>();
     qRegisterMetaType<DiscoveredDevice>();
     qRegisterMetaType<Message>();
+
+    m_input = std::make_unique<RemoteInput>();
+    wireRemoteInput();
+
+    // An unanswered request is a refusal after a minute: a prompt left up on
+    // an empty desk must not be answerable later by whoever sits down.
+    m_inputApprovalTimer.setSingleShot(true);
+    m_inputApprovalTimer.setInterval(60000);
+    connect(&m_inputApprovalTimer, &QTimer::timeout, this, [this] {
+        const QString deviceId = m_inputApprovalPending;
+        clearInputApproval();
+        if (Connection *connection = connectionForDevice(deviceId)) {
+            connection->send(Message::inputState(connection->nextCounter(), false,
+                                                 QStringLiteral("full"),
+                                                 tr("nobody answered on the computer")));
+        }
+    });
 
     // One snapshot answers every device waiting for one, and the local UI
     // draws from the same cache — so a dashboard open on screen while a phone
@@ -641,6 +661,18 @@ void DeviceManager::forgetPendingWork(const QString &deviceId) {
 
     m_phoneStatusAwaiting.remove(deviceId);
     m_shareTextRate.remove(deviceId);
+    m_clipboardRate.remove(deviceId);
+    m_folderRate.remove(deviceId);
+    m_previewRate.remove(deviceId);
+    // Nobody controls this computer through a link that is gone, and a
+    // question about a phone that left is not a question any more.
+    m_input->end(deviceId, tr("the phone disconnected"));
+    if (m_inputApprovalPending == deviceId) {
+        clearInputApproval();
+    }
+    if (m_inputOnceGrant == deviceId) {
+        m_inputOnceGrant.clear();
+    }
     if (m_findPhoneAwaiting.remove(deviceId)) {
         // Whatever it was doing, this side can no longer see or stop it —
         // the UI must not keep offering "Stop ringing" for a phone it cannot
@@ -1427,6 +1459,215 @@ void DeviceManager::handleMessage(Connection *connection, const Message &message
         break;
     }
 
+    case MessageType::InputSession: {
+        const bool start = message.boolean(QLatin1StringView("start"));
+        const QString modeName = message.string(QLatin1StringView("mode"), 16);
+        const bool full = modeName == QLatin1StringView("full");
+        if (!start) {
+            m_input->end(link->deviceId, tr("stopped on the phone"));
+            break;
+        }
+        if (!full && modeName != QLatin1StringView("presenter")) {
+            break;
+        }
+        // Full control is opt-in per device (optInCapabilities); the
+        // presenter's fixed keys ride on either capability.
+        const bool allowed = full
+            ? fullInputAllowed(*link)
+            : (capabilityAllowed(*link, Capability::Presenter)
+               || capabilityAllowed(*link, Capability::RemoteInput));
+        if (!allowed && full && link->trusted
+            && link->peerCapabilities.testFlag(Capability::RemoteInput)) {
+            // Not allowed yet: ask the owner, on this screen. One question at
+            // a time — a second phone waits its turn rather than stacking
+            // prompts that could be clicked through without reading.
+            if (!m_inputApprovalPending.isEmpty() && m_inputApprovalPending != link->deviceId) {
+                connection->send(Message::inputState(connection->nextCounter(), false, modeName,
+                                                      tr("the computer is answering another "
+                                                         "request — try again in a moment")));
+                break;
+            }
+            const bool fresh = m_inputApprovalPending.isEmpty();
+            m_inputApprovalPending = link->deviceId;
+            m_inputApprovalTimer.start();
+            connection->send(Message::inputState(connection->nextCounter(), false, modeName,
+                                                 tr("waiting for approval on the computer"),
+                                                 true));
+            if (fresh) {
+                emit remoteInputApprovalRequested(link->deviceId, link->deviceName);
+            }
+            break;
+        }
+        if (!allowed) {
+            connection->send(Message::inputState(
+                connection->nextCounter(), false, modeName,
+                tr("this computer has that switched off for your device")));
+            break;
+        }
+        if (!m_input->begin(link->deviceId,
+                            full ? RemoteInput::Mode::Full : RemoteInput::Mode::Presenter)) {
+            connection->send(Message::inputState(connection->nextCounter(), false, modeName,
+                                                 tr("another device is controlling this "
+                                                    "computer")));
+        }
+        break;
+    }
+
+    case MessageType::InputEvent: {
+        if (m_input->owner() != link->deviceId) {
+            break;
+        }
+        // Re-checked per event, so a revocation mid-session stops it cold.
+        const bool full = m_input->mode() == RemoteInput::Mode::Full;
+        if (full ? !fullInputAllowed(*link)
+                 : !(capabilityAllowed(*link, Capability::Presenter)
+                     || capabilityAllowed(*link, Capability::RemoteInput))) {
+            m_input->end(link->deviceId, tr("switched off on the computer"));
+            break;
+        }
+        m_input->handleEvent(link->deviceId, message.body().toVariantMap());
+        break;
+    }
+
+    case MessageType::FolderList: {
+        const qint64 rawId = message.integer(QLatin1StringView("requestId"), 0xFFFFFFFFLL);
+        const auto requestId = static_cast<quint32>(qMax<qint64>(rawId, 0));
+        if (!capabilityAllowed(*link, Capability::SharedFolder)) {
+            connection->send(Message::folderListing(
+                connection->nextCounter(), requestId, QString(), {},
+                tr("this computer has that switched off for your device")));
+            break;
+        }
+        if (!allowWindow(m_folderRate, link->deviceId, 20, 5000)) {
+            break;
+        }
+        // string() refuses control characters outright; SharedFolder then
+        // refuses everything that is not a plain path inside the folder.
+        const QString path = message.string(QLatin1StringView("path"), SharedFolder::kMaxPathChars);
+        QString error;
+        m_shared.ensureExists();
+        const QJsonArray entries = m_shared.list(path, error);
+        connection->send(Message::folderListing(connection->nextCounter(), requestId, path,
+                                                entries, error));
+        break;
+    }
+
+    case MessageType::FolderFetch: {
+        const qint64 rawId = message.integer(QLatin1StringView("requestId"), 0xFFFFFFFFLL);
+        const auto requestId = static_cast<quint32>(qMax<qint64>(rawId, 0));
+        if (!capabilityAllowed(*link, Capability::SharedFolder)
+            || !capabilityAllowed(*link, Capability::FileTransfer)) {
+            connection->send(Message::folderFetchResult(
+                connection->nextCounter(), requestId, 0,
+                tr("this computer has that switched off for your device")));
+            break;
+        }
+        if (!allowWindow(m_folderRate, link->deviceId, 20, 5000)) {
+            break;
+        }
+        const QString path = message.string(QLatin1StringView("path"), SharedFolder::kMaxPathChars);
+        QString error;
+        const QString file = m_shared.fileForFetch(path, error);
+        if (file.isEmpty()) {
+            connection->send(Message::folderFetchResult(connection->nextCounter(), requestId, 0,
+                                                        error));
+            break;
+        }
+        // The id goes out *before* the offer, on the same ordered link, so
+        // the phone knows this offer is the one it asked for.
+        const quint32 transferId = offerFile(link->deviceId, file, [&](quint32 id) {
+            connection->send(Message::folderFetchResult(connection->nextCounter(), requestId,
+                                                        id, QString()));
+        });
+        if (transferId == 0) {
+            connection->send(Message::folderFetchResult(connection->nextCounter(), requestId, 0,
+                                                        tr("that file could not be sent")));
+        }
+        break;
+    }
+
+    case MessageType::FolderPreview: {
+        const qint64 rawId = message.integer(QLatin1StringView("requestId"), 0xFFFFFFFFLL);
+        const auto requestId = static_cast<quint32>(qMax<qint64>(rawId, 0));
+        const QString path = message.string(QLatin1StringView("path"), SharedFolder::kMaxPathChars);
+        if (!capabilityAllowed(*link, Capability::SharedFolder)) {
+            connection->send(Message::folderPreviewResult(
+                connection->nextCounter(), requestId, path, {}, 0, 0,
+                tr("this computer has that switched off for your device")));
+            break;
+        }
+        // A screenful of thumbnails, not a flood: 60 per ten seconds, at most
+        // four being decoded for one phone at once. Beyond that, no answer —
+        // the phone asks again for what is still on screen.
+        if (!allowWindow(m_previewRate, link->deviceId, 60, 10000)
+            || m_previewsInFlight.value(link->deviceId) >= 4) {
+            break;
+        }
+        QString error;
+        const QString file = m_shared.fileForFetch(path, error);
+        if (file.isEmpty() || !thumbnailer::looksLikeImage(file)) {
+            connection->send(Message::folderPreviewResult(
+                connection->nextCounter(), requestId, path, {}, 0, 0,
+                error.isEmpty() ? tr("not a picture") : error));
+            break;
+        }
+        const int edge = message.string(QLatin1StringView("size"), 8) == QLatin1StringView("large")
+            ? thumbnailer::kLargeEdge
+            : thumbnailer::kThumbEdge;
+        const QString deviceId = link->deviceId;
+        m_previewsInFlight[deviceId] += 1;
+        // Decoded off the event loop: a large photo takes long enough to
+        // stall heartbeats and every other device.
+        QPointer<DeviceManager> self(this);
+        QThreadPool::globalInstance()->start([self, deviceId, requestId, path, file, edge] {
+            QSize size;
+            QString err;
+            const QByteArray jpeg = thumbnailer::jpegPreview(file, edge, size, err);
+            QMetaObject::invokeMethod(
+                self.data(),
+                [self, deviceId, requestId, path, jpeg, size, err] {
+                    if (!self) {
+                        return;
+                    }
+                    int &inFlight = self->m_previewsInFlight[deviceId];
+                    inFlight = qMax(0, inFlight - 1);
+                    const auto current = self->linkForDevice(deviceId);
+                    // Re-checked at delivery, like every other answer.
+                    if (!current || !self->capabilityAllowed(*current, Capability::SharedFolder)) {
+                        return;
+                    }
+                    Connection *c = current->connection;
+                    c->send(Message::folderPreviewResult(c->nextCounter(), requestId, path, jpeg,
+                                                         size.width(), size.height(), err));
+                },
+                Qt::QueuedConnection);
+        });
+        break;
+    }
+
+    case MessageType::ClipboardSync: {
+        if (!capabilityAllowed(*link, Capability::ClipboardSync)) {
+            break;
+        }
+        if (!allowWindow(m_clipboardRate, link->deviceId, limits::kMaxShareTextsPerWindow,
+                         limits::kShareTextWindowMs)) {
+            qCInfo(lcLink) << "dropping clipboard from" << link->deviceId << "(rate limit)";
+            break;
+        }
+        const QString text =
+            message.text(QLatin1StringView("text"), limits::kMaxShareTextChars);
+        if (text.isEmpty()) {
+            break;
+        }
+        emit clipboardReceived(link->deviceId, text);
+        break;
+    }
+
+    case MessageType::InputState:
+    case MessageType::FolderListing:
+    case MessageType::FolderFetchResult:
+    case MessageType::FolderPreviewResult:
+        // Computer -> phone only.
     case MessageType::PhoneStatusRequest:
     case MessageType::FindPhone:
         // Phone-side messages: a computer has no battery reading to give and
@@ -1730,6 +1971,13 @@ bool DeviceManager::setCapabilityEnabled(const QString &deviceId, Capability cap
     Capabilities caps = device.enabledCapabilities;
     caps.setFlag(capability, enabled);
     const bool ok = m_store.update(device.publicKey, device.deviceName, caps);
+    // A revocation takes effect now, not at the next session.
+    if (ok && !enabled && m_input->owner() == deviceId
+        && (capability == Capability::RemoteInput
+            || (capability == Capability::Presenter
+                && m_input->mode() == RemoteInput::Mode::Presenter))) {
+        m_input->end(deviceId, tr("switched off on the computer"));
+    }
     if (ok) {
         emit deviceListChanged();
     }
@@ -1737,13 +1985,18 @@ bool DeviceManager::setCapabilityEnabled(const QString &deviceId, Capability cap
 }
 
 bool DeviceManager::sendFile(const QString &deviceId, const QString &localPath) {
+    return offerFile(deviceId, localPath) != 0;
+}
+
+quint32 DeviceManager::offerFile(const QString &deviceId, const QString &localPath,
+                                 const std::function<void(quint32)> &beforeOffer) {
     const auto link = linkForDevice(deviceId);
     if (!link || !capabilityAllowed(*link, Capability::FileTransfer)) {
-        return false;
+        return 0;
     }
     const QFileInfo info(localPath);
     if (!info.exists() || !info.isFile() || info.size() > limits::kMaxFileBytes) {
-        return false;
+        return 0;
     }
 
     const quint32 transferId = m_nextTransferId++;
@@ -1753,9 +2006,32 @@ bool DeviceManager::sendFile(const QString &deviceId, const QString &localPath) 
     transfer.size = info.size();
     m_outgoingTransfers.insert(transferId, transfer);
 
+    if (beforeOffer) {
+        beforeOffer(transferId);
+    }
     Message offer = Message::fileOffer(link->connection->nextCounter(), transferId,
                                        info.fileName(), info.size());
-    return link->connection->send(offer);
+    // A picture travels with a small preview, so the phone can see what it
+    // is being asked to accept. Optional: an older phone ignores the field.
+    if (thumbnailer::looksLikeImage(info.fileName())) {
+        QSize size;
+        QString error;
+        const QByteArray jpeg =
+            thumbnailer::jpegPreview(localPath, thumbnailer::kOfferEdge, size, error);
+        if (!jpeg.isEmpty()) {
+            QJsonObject body = offer.body();
+            body.remove(QLatin1StringView("v"));
+            body.remove(QLatin1StringView("t"));
+            body.remove(QLatin1StringView("c"));
+            body.insert(QLatin1StringView("thumbnail"), QString::fromLatin1(jpeg.toBase64()));
+            offer = Message(MessageType::FileOffer, offer.counter(), body);
+        }
+    }
+    if (!link->connection->send(offer)) {
+        m_outgoingTransfers.remove(transferId);
+        return 0;
+    }
+    return transferId;
 }
 
 void DeviceManager::pumpOutgoing(quint32 transferId) {
@@ -1945,6 +2221,115 @@ bool DeviceManager::allowShareText(const QString &deviceId) {
         window.count = 0;
     }
     return ++window.count <= limits::kMaxShareTextsPerWindow;
+}
+
+bool DeviceManager::allowWindow(QHash<QString, RateWindow> &table, const QString &deviceId,
+                                int max, int windowMs) {
+    static QElapsedTimer clock;
+    if (!clock.isValid()) {
+        clock.start();
+    }
+    const qint64 now = clock.elapsed();
+    RateWindow &window = table[deviceId];
+    if (now - window.startedMs >= windowMs) {
+        window.startedMs = now;
+        window.count = 0;
+    }
+    return ++window.count <= max;
+}
+
+int DeviceManager::sendClipboard(const QString &text) {
+    if (text.isEmpty() || text.size() > limits::kMaxShareTextChars) {
+        return 0;
+    }
+    int sent = 0;
+    for (const auto &link : m_links) {
+        if (!capabilityAllowed(*link, Capability::ClipboardSync)) {
+            continue;
+        }
+        if (link->connection->send(
+                Message::clipboardSync(link->connection->nextCounter(), text))) {
+            ++sent;
+        }
+    }
+    return sent;
+}
+
+bool DeviceManager::fullInputAllowed(const Link &link) const {
+    if (capabilityAllowed(link, Capability::RemoteInput)) {
+        return true;
+    }
+    // "Allow once": this device, this session, and only while it is paired
+    // and still offers the capability.
+    return !m_inputOnceGrant.isEmpty() && link.trusted && link.deviceId == m_inputOnceGrant
+        && link.peerCapabilities.testFlag(Capability::RemoteInput)
+        && m_store.deviceForKey(link.connection->peerPublicKey()).isValid();
+}
+
+void DeviceManager::clearInputApproval() {
+    const bool had = !m_inputApprovalPending.isEmpty();
+    m_inputApprovalPending.clear();
+    m_inputApprovalTimer.stop();
+    if (had) {
+        emit remoteInputApprovalCleared();
+    }
+}
+
+void DeviceManager::answerRemoteInput(const QString &deviceId, InputApproval answer) {
+    if (deviceId.isEmpty() || deviceId != m_inputApprovalPending) {
+        return; // only the question actually open can be answered
+    }
+    clearInputApproval();
+    Connection *connection = connectionForDevice(deviceId);
+    if (answer == InputApproval::Deny) {
+        if (connection) {
+            connection->send(Message::inputState(connection->nextCounter(), false,
+                                                 QStringLiteral("full"),
+                                                 tr("declined on the computer")));
+        }
+        return;
+    }
+    if (answer == InputApproval::Always) {
+        setCapabilityEnabled(deviceId, Capability::RemoteInput, true);
+    } else {
+        m_inputOnceGrant = deviceId;
+    }
+    if (connection && !m_input->begin(deviceId, RemoteInput::Mode::Full)) {
+        if (m_inputOnceGrant == deviceId) {
+            m_inputOnceGrant.clear();
+        }
+        connection->send(Message::inputState(connection->nextCounter(), false,
+                                             QStringLiteral("full"),
+                                             tr("another device is controlling this computer")));
+    }
+}
+
+void DeviceManager::stopRemoteInput() {
+    m_input->end(m_input->owner(), tr("stopped on the computer"));
+}
+
+void DeviceManager::setInputBackendForTesting(InputBackend *backend) {
+    m_input = std::make_unique<RemoteInput>(backend);
+    wireRemoteInput();
+}
+
+void DeviceManager::wireRemoteInput() {
+    connect(m_input.get(), &RemoteInput::stateChanged, this,
+            [this](const QString &deviceId, bool active, RemoteInput::Mode mode,
+                   const QString &error) {
+                const QString modeName = mode == RemoteInput::Mode::Full
+                    ? QStringLiteral("full")
+                    : QStringLiteral("presenter");
+                // A one-time grant lasts exactly one session.
+                if (!active && deviceId == m_inputOnceGrant) {
+                    m_inputOnceGrant.clear();
+                }
+                if (Connection *connection = connectionForDevice(deviceId)) {
+                    connection->send(
+                        Message::inputState(connection->nextCounter(), active, modeName, error));
+                }
+                emit remoteInputChanged(deviceId, active, modeName, error);
+            });
 }
 
 bool DeviceManager::requestStatus(const QString &deviceId) {

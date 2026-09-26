@@ -24,6 +24,7 @@ Rectangle {
     property real now: Date.now()
 
     signal sendFileRequested(string deviceId)
+    signal sendTextRequested(string deviceId, string name)
 
     readonly property var status: phone.status || ({})
     readonly property bool connected: phone.connected === true
@@ -34,7 +35,7 @@ Rectangle {
     radius: 16
     color: Theme.pill
     border.width: 1
-    border.color: phone.ringing ? Theme.warn : Theme.hairline
+    border.color: drop.containsDrag ? Theme.ok : phone.ringing ? Theme.warn : Theme.hairline
     Behavior on border.color { ColorAnimation { duration: 200 } }
 
     // ---- Formatting ------------------------------------------------------
@@ -104,6 +105,32 @@ Rectangle {
         // One fact per line: the column is narrow, and a wrapped "·" left
         // dangling at the start of a line reads as a typo.
         return parts.join("\n")
+    }
+
+    // Files dropped on the card go to this phone, each through the usual
+    // offer — the phone still asks before anything is written there.
+    DropArea {
+        id: drop
+        anchors.fill: parent
+        enabled: card.connected && card.phone.canFiles === true
+        keys: ["text/uri-list"]
+        onDropped: (event) => {
+            for (const url of event.urls) {
+                Backend.sendFile(card.phone.deviceId, url)
+            }
+            event.acceptProposedAction()
+        }
+    }
+
+    Text {
+        anchors.centerIn: parent
+        z: 2
+        visible: drop.containsDrag
+        text: qsTr("Drop to send to %1").arg(card.phone.name || "")
+        color: Theme.ok
+        font.family: Theme.fontSans
+        font.pixelSize: 15
+        font.weight: Font.DemiBold
     }
 
     // ---- Body ------------------------------------------------------------
@@ -189,9 +216,12 @@ Rectangle {
                     id: stateChip
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
-                    icon: card.phone.ringing ? "bell" : card.connected ? "link" : "offline"
-                    tone: card.phone.ringing ? 2 : card.connected ? 1 : -1
+                    icon: card.phone.ringing ? "bell"
+                          : card.phone.controlling ? "phone"
+                          : card.connected ? "link" : "offline"
+                    tone: card.phone.ringing || card.phone.controlling ? 2 : card.connected ? 1 : -1
                     text: card.phone.ringing ? qsTr("Ringing")
+                          : card.phone.controlling ? qsTr("Controlling")
                           : card.connected ? qsTr("Linked")
                           : qsTr("Not reachable")
                 }
@@ -363,7 +393,12 @@ Rectangle {
                 onClicked: card.sendFileRequested(card.phone.deviceId)
             }
             MazeButton {
-                text: qsTr("Send clipboard")
+                text: qsTr("Send text")
+                enabled: card.connected && card.phone.canOpen === true
+                onClicked: card.sendTextRequested(card.phone.deviceId, card.phone.name || "")
+            }
+            MazeButton {
+                text: qsTr("Clipboard")
                 enabled: card.connected && card.phone.canOpen === true
                 onClicked: Backend.sendClipboardTo(card.phone.deviceId)
             }
