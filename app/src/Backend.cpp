@@ -1152,9 +1152,9 @@ bool Backend::sendClipboardToPhone() {
 }
 
 void Backend::respondToFileOffer(const QString &deviceId, int transferId, bool accept) {
-    if (transferId < 0) {
-        return;
-    }
+    // The int only carries the id's bits through QML: a phone numbers its
+    // offers in the upper half of the 32-bit range, which reads negative
+    // here. The manager checks the id against offers it actually holds.
     m_manager.respondToFileOffer(deviceId, static_cast<quint32>(transferId), accept);
 }
 

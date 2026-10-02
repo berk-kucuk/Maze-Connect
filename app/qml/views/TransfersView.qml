@@ -2,10 +2,47 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
+import QtQuick.Dialogs
 import MazeConnect.App
 
 Item {
     id: root
+
+    // Where "Send" goes: the first linked phone that takes files. The
+    // dashboard's phone cards still pick one explicitly when several are
+    // linked.
+    readonly property var target: {
+        for (const p of Backend.phones) {
+            if (p.connected && p.canFiles === true)
+                return p
+        }
+        return null
+    }
+
+    FileDialog {
+        id: fileDialog
+        title: qsTr("Choose files to send")
+        fileMode: FileDialog.OpenFiles
+        onAccepted: {
+            if (!root.target)
+                return
+            for (const url of selectedFiles)
+                Backend.sendFile(root.target.deviceId, url)
+        }
+    }
+
+    // Files dropped anywhere on the page go the same way, each through the
+    // usual offer — the phone still asks before anything is written there.
+    DropArea {
+        anchors.fill: parent
+        enabled: root.target !== null
+        keys: ["text/uri-list"]
+        onDropped: (event) => {
+            for (const url of event.urls)
+                Backend.sendFile(root.target.deviceId, url)
+            event.acceptProposedAction()
+        }
+    }
 
     function humanSize(bytes) {
         if (bytes < 1024)
@@ -17,22 +54,34 @@ Item {
         return qsTr("%1 GB").arg((bytes / (1024 * 1024 * 1024)).toFixed(2))
     }
 
-    Row {
+    Item {
         id: header
         width: parent.width
-        spacing: 12
+        height: clearButton.height
 
         SectionLabel {
-            text: qsTr("Transfers")
+            anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
+            text: qsTr("Transfers")
         }
 
-        Item { width: parent.width - 260; height: 1 }
+        Row {
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: 12
 
-        MazeButton {
-            text: qsTr("Clear finished")
-            enabled: Backend.transfers.count > Backend.transfers.activeCount
-            onClicked: Backend.transfers.clearFinished()
+            MazeButton {
+                text: root.target ? qsTr("Send to %1").arg(root.target.name) : qsTr("Send")
+                enabled: root.target !== null
+                onClicked: fileDialog.open()
+            }
+
+            MazeButton {
+                id: clearButton
+                text: qsTr("Clear finished")
+                enabled: Backend.transfers.count > Backend.transfers.activeCount
+                onClicked: Backend.transfers.clearFinished()
+            }
         }
     }
 
@@ -64,7 +113,9 @@ Item {
                 width: parent.width
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.WordWrap
-                text: qsTr("Files you send or accept appear here while they move, and stay until you clear them.")
+                text: root.target
+                      ? qsTr("Send a file, or drop one here. Files you send or accept appear here while they move, and stay until you clear them.")
+                      : qsTr("Link a phone to send it files. Files you send or accept appear here while they move, and stay until you clear them.")
                 color: Theme.dim
                 font.family: Theme.fontSans
                 font.pixelSize: 13

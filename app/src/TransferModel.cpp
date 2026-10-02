@@ -77,8 +77,18 @@ QHash<int, QByteArray> TransferModel::roleNames() const {
 
 void TransferModel::started(quint32 transferId, const QString &deviceName,
                             const QString &filename, qint64 totalBytes, bool incoming) {
-    if (indexOf(transferId) >= 0) {
-        return;
+    // Ids are the sender's numbers, and each side counts from its own start:
+    // a phone's first offer can carry the same id as a file this computer
+    // sent it earlier. A finished row with that id is history, not this
+    // transfer — replace it, or the new one never shows up and its progress
+    // lands on the old row.
+    if (const int existing = indexOf(transferId); existing >= 0) {
+        if (m_rows[existing].state == Running) {
+            return;
+        }
+        beginRemoveRows(QModelIndex(), existing, existing);
+        m_rows.removeAt(existing);
+        endRemoveRows();
     }
     beginInsertRows(QModelIndex(), 0, 0);
     m_rows.prepend(Row{transferId, deviceName, filename, 0, totalBytes, Running, {}, incoming});

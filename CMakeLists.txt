@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 project(MazeConnect
-    VERSION 1.4.1
+    VERSION 1.4.2
     DESCRIPTION "Maze Linux device-link app"
     LANGUAGES CXX
 )
@@ -61,12 +61,18 @@ endif()
 # The mark in pixmaps/ is the same artwork with the ground taken away, for the
 # sidebar and the corner watermark. Those are drawn *on* the panel, where a
 # black square would read as a hole punched in it.
-foreach(size 48 64 128 256 512)
+#
+# 16-32 carry the reduced mark (the tray picks these), 48 and up the full one;
+# all are rendered from one 1024 grid by packaging/icons/src/render.sh.
+foreach(size 16 22 24 32 48 64 128 256 512)
     install(FILES "packaging/icons/maze-connect-${size}.png"
         DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/${size}x${size}/apps"
         RENAME maze-connect.png
     )
 endforeach()
+install(FILES packaging/icons/maze-connect.svg
+    DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps"
+)
 
 install(FILES packaging/icons/maze-connect-mark.png
     DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/pixmaps"
