@@ -95,6 +95,14 @@ Window {
                 }
 
                 Text {
+                    text: qsTr("for Maze Linux")
+                    color: Theme.faint
+                    font.family: Theme.fontSans
+                    font.pixelSize: 10
+                    anchors.horizontalCenter: parent.horizontalCenter
+                }
+
+                Text {
                     text: Backend.connectedCount > 0
                           ? qsTr("%1 linked").arg(Backend.connectedCount)
                           : qsTr("Nothing linked")

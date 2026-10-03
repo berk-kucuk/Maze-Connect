@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 project(MazeConnect
-    VERSION 1.4.2
+    VERSION 1.4.3
     DESCRIPTION "Maze Linux device-link app"
     LANGUAGES CXX
 )

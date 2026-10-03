@@ -1,7 +1,7 @@
 # Maintainer: Berk Küçük <dev.berkkucukk@gmail.com>
 
 pkgname=maze-connect
-pkgver=1.4.2
+pkgver=1.4.3
 pkgrel=1
 pkgdesc="Maze Linux device-link app — pair your phone over the LAN with verified, pinned mutual TLS"
 arch=('x86_64' 'aarch64')

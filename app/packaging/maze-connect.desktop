@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=Maze Connect
-Comment=Link your phone to this computer
+Comment=Link your phone to this computer — for Maze Linux
 Exec=maze-connect
 Icon=maze-connect
 Terminal=false
