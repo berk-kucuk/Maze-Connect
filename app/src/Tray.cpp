@@ -109,7 +109,15 @@ void Tray::notify(const QString &title, const QString &body, const QUrl &url) {
         return;
     }
     m_pendingUrl = url;
-    m_icon->showMessage(title, body, m_icon->icon(), 8000);
+    // Bodies carry text a phone sent (shared text, file names). Notification
+    // servers that support body markup would interpret "<a>"/"<img>" in it, so
+    // angle brackets are swapped for look-alike quotes before display.
+    auto plain = [](QString s) {
+        s.replace(QLatin1Char('<'), QChar(0x2039));
+        s.replace(QLatin1Char('>'), QChar(0x203A));
+        return s;
+    };
+    m_icon->showMessage(plain(title), plain(body), m_icon->icon(), 8000);
 }
 
 void Tray::toggleWindow() {

@@ -66,6 +66,7 @@ Item {
             Text {
                 width: parent.width
                 wrapMode: Text.WrapAnywhere
+                textFormat: Text.PlainText   // peer-supplied: never interpret markup
                 text: root.filename
                 color: Theme.text
                 font.family: Theme.fontMono

@@ -170,6 +170,7 @@ Item {
                 }
 
                 Text {
+                    textFormat: Text.PlainText   // peer-supplied: never interpret markup
                     text: item.filename
                     color: Theme.text
                     font.family: Theme.fontSans
@@ -221,6 +222,7 @@ Item {
                 anchors.bottomMargin: 9
                 width: parent.width - 32
                 elide: Text.ElideMiddle
+                textFormat: Text.PlainText   // peer-supplied: never interpret markup
                 text: item.detail !== ""
                       ? item.detail
                       : (item.incoming ? qsTr("From %1") : qsTr("To %1")).arg(item.deviceName)

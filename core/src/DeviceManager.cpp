@@ -832,8 +832,15 @@ void DeviceManager::handleMessage(Connection *connection, const Message &message
 
         const QString deviceId = message.string(QLatin1StringView("deviceId"),
                                                 limits::kMaxDeviceIdChars);
-        const QString deviceName = message.string(QLatin1StringView("deviceName"),
-                                                  limits::kMaxDeviceNameChars);
+        // Markup characters are dropped: the name is rendered by Qt Quick Text
+        // (AutoText) and in notifications, where "<b>…" or "<img src=…>" would
+        // be interpreted rather than shown. Same rule as discovery beacons.
+        QString deviceName = message.string(QLatin1StringView("deviceName"),
+                                            limits::kMaxDeviceNameChars);
+        deviceName.remove(QLatin1Char('<'));
+        deviceName.remove(QLatin1Char('>'));
+        deviceName.remove(QLatin1Char('&'));
+        deviceName = deviceName.trimmed();
         if (deviceId.isEmpty() || deviceName.isEmpty()) {
             dropConnection(connection, QStringLiteral("malformed hello"));
             return;
@@ -970,6 +977,16 @@ void DeviceManager::handleMessage(Connection *connection, const Message &message
         auto it = m_pendingPairings.find(link->deviceId);
         if (it == m_pendingPairings.end() || !it->weInitiated) {
             dropConnection(connection, QStringLiteral("unexpected pair response"));
+            return;
+        }
+        // One response per handshake. Our nonce is revealed right after the
+        // first one, so a second PairResponse would let the responder pick its
+        // nonce against a known value and grind the 6-digit code to match
+        // whatever the other screen shows — the exact attack the commitment
+        // exists to stop. The responder side already refuses a repeated reveal.
+        if (!link->theirNonce.isEmpty()) {
+            m_pendingPairings.erase(it);
+            dropConnection(connection, QStringLiteral("pair response repeated"));
             return;
         }
         const QByteArray theirNonce = message.binary(QLatin1StringView("nonce"), Sas::kNonceSize);
@@ -1900,6 +1917,7 @@ bool DeviceManager::requestPairingAt(const QHostAddress &address, quint16 port,
         }
         link->deviceId = deviceId;
         link->ourNonce = Sas::generateNonce();
+        link->theirNonce.clear();   // a fresh handshake accepts exactly one PairResponse
         if (link->ourNonce.isEmpty()) {
             dropConnection(connection, QStringLiteral("could not generate a pairing nonce"));
             return;

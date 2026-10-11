@@ -130,6 +130,7 @@ Item {
                 }
                 Text {
                     visible: entry.detail !== ""
+                    textFormat: Text.PlainText   // peer-supplied: never interpret markup
                     text: entry.detail
                     color: Theme.faint
                     font.family: Theme.fontMono

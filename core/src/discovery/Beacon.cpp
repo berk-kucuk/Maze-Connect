@@ -37,6 +37,18 @@ bool hasControlCharacters(const QString &s) {
     return false;
 }
 
+/// A device name is shown in Qt Quick Text items, notification bodies and the
+/// pairing prompt. Qt's default AutoText format renders a string that looks
+/// like markup as rich text, so a beacon naming itself "<img src=http://…>"
+/// could restyle the UI or make it fetch a remote URL. Names never need these
+/// characters; drop them before the name goes anywhere.
+QString withoutMarkup(QString s) {
+    s.remove(QLatin1Char('<'));
+    s.remove(QLatin1Char('>'));
+    s.remove(QLatin1Char('&'));
+    return s.trimmed();
+}
+
 QString boundedString(const QJsonObject &obj, QLatin1StringView key, int maxChars) {
     const QJsonValue value = obj.value(key);
     if (!value.isString()) {
@@ -246,8 +258,8 @@ void Beacon::readPendingDatagrams() {
 
         const QString deviceId = boundedString(obj, QLatin1StringView("deviceId"),
                                                limits::kMaxDeviceIdChars);
-        const QString deviceName = boundedString(obj, QLatin1StringView("deviceName"),
-                                                 limits::kMaxDeviceNameChars);
+        const QString deviceName = withoutMarkup(
+            boundedString(obj, QLatin1StringView("deviceName"), limits::kMaxDeviceNameChars));
         const QString deviceType = boundedString(obj, QLatin1StringView("deviceType"), 16);
         if (deviceId.isEmpty() || deviceName.isEmpty()) {
             continue;
