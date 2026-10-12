@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QFileSystemWatcher>
 #include <QHash>
 #include <QTimer>
 #include <QUrl>
@@ -124,6 +125,20 @@ class Backend : public QObject {
     Q_PROPERTY(QString commandsError READ commandsError NOTIFY commandsChanged)
     Q_PROPERTY(QString commandsPath READ commandsPath CONSTANT)
 
+    /**
+     * The persistent record of what paired devices did (DeviceManager's
+     * AuditLog), newest first: maps with at, device, name, action, detail, ok.
+     */
+    Q_PROPERTY(QVariantList auditEntries READ auditEntries NOTIFY auditChanged)
+
+    /**
+     * sudo/polkit approval as root set it up: moduleInstalled, sudoEnabled,
+     * polkitEnabled (bool), enrolled (list of key codes for this user), and
+     * relayError (why the local relay is not listening, or empty). Read from
+     * world-readable files; this process can see it but not change it.
+     */
+    Q_PROPERTY(QVariantMap adminApproval READ adminApproval NOTIFY adminApprovalChanged)
+
     // --- Startup ---------------------------------------------------------
     Q_PROPERTY(bool autostartEnabled READ autostartEnabled WRITE setAutostartEnabled
                    NOTIFY autostartChanged)
@@ -195,6 +210,9 @@ public:
     bool autostartEnabled() const;
     void setAutostartEnabled(bool enabled);
 
+    QVariantList auditEntries() const;
+    QVariantMap adminApproval() const { return m_adminApproval; }
+
 public slots:
     void requestPairing(const QString &deviceId);
     void acceptPairing();
@@ -233,6 +251,28 @@ public slots:
 
     /// Open the shared folder in the file manager, creating it if needed.
     void openSharedFolder();
+
+    /**
+     * Let (or stop letting) one phone unlock this screen and approve sudo.
+     * Refused while the phone has sent no approval key — there would be
+     * nothing to say yes to.
+     */
+    void setApprovalAllowed(const QString &deviceId, bool allowed);
+
+    /// Re-read the sudo/polkit setup from /etc.
+    void refreshAdminApproval();
+
+    /// Start the approval relay again, after it failed or its socket went.
+    void restartApprovalRelay();
+
+    /// Put @p text on this computer's clipboard (the setup commands).
+    void copyText(const QString &text);
+
+    /// Ask a phone to lock its screen now.
+    void lockPhone(const QString &deviceId);
+
+    /// Forget the persistent audit log.
+    void clearAudit();
 
     /// Send this computer's clipboard to one particular phone.
     bool sendClipboardTo(const QString &deviceId);
@@ -345,6 +385,8 @@ signals:
     void guardBannerChanged();
     void commandsChanged();
     void autostartChanged();
+    void auditChanged();
+    void adminApprovalChanged();
     void commandFinished(const QString &id, int exitCode, const QString &output);
     void securityAlert(const QString &summary, const QString &detail);
     void fileOffered(const QString &deviceId, int transferId, const QString &filename,
@@ -406,6 +448,19 @@ private:
 
     QVariantList m_commands;
     QString m_commandsError;
+
+    QVariantMap m_adminApproval;
+    QString m_relayError;
+    /// /etc/pam.d and /etc/maze-connect change under us when the owner runs
+    /// maze-connect-approvers in a terminal; Settings follows without a
+    /// Refresh button. Watched as directories, because the tool replaces
+    /// files by renaming over them.
+    QFileSystemWatcher m_adminWatcher;
+    QTimer m_adminRefresh;
+    /// Restarts the relay if its socket disappears (a cleaned runtime
+    /// directory, another copy that took it over and quit).
+    QTimer m_relayWatchdog;
+    void watchAdminPaths();
 
     /// Ids for runs started from this window, so their output is shown here
     /// and not confused with a run a phone asked for.

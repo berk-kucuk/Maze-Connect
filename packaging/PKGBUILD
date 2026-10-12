@@ -1,7 +1,7 @@
 # Maintainer: Berk Küçük <dev.berkkucukk@gmail.com>
 
 pkgname=maze-connect
-pkgver=1.4.4
+pkgver=1.5.3
 pkgrel=1
 pkgdesc="Maze Linux device-link app — pair your phone over the LAN with verified, pinned mutual TLS"
 arch=('x86_64' 'aarch64')
@@ -12,6 +12,8 @@ depends=(
     'qt6-declarative'
     'kwindowsystem'
     'openssl'
+    'pam'
+    'systemd-libs'
 )
 optdepends=('maze-tools: readings of this computer for the phone dashboard; without it the phone says so'
             'wireplumber: lets the phone set the computer volume (wpctl); media players work without it')
@@ -46,6 +48,13 @@ package() {
     cd "$srcdir/$pkgname-$pkgver"
     DESTDIR="$pkgdir" cmake --install build
 }
+
+# SUDO / POLKIT APPROVAL
+# /usr/lib/security/pam_mazeconnect.so and /usr/bin/maze-connect-approvers are
+# installed, and nothing is switched on: no file under /etc/pam.d is touched
+# by installing or upgrading. The owner enrols a phone and enables a service
+# by hand (`sudo maze-connect-approvers enroll`, `... pam enable sudo`). The
+# remove scriptlet takes the PAM lines out again before the module goes.
 
 # THE SYSTEMD UNIT
 # Installs to /usr/lib/systemd/user/, never the system unit directory. Maze

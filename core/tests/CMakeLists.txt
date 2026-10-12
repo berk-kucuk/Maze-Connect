@@ -17,6 +17,7 @@ set(MAZECONNECT_TESTS
     tst_interop
     tst_phonelink
     tst_remotecontrol
+    tst_approval
 )
 
 foreach(test IN LISTS MAZECONNECT_TESTS)
@@ -27,6 +28,10 @@ foreach(test IN LISTS MAZECONNECT_TESTS)
     # a build machine has no display, so every test runs offscreen.
     set_tests_properties(${test} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endforeach()
+
+# The approval tests play the phone, so they sign with a key of their own.
+find_package(OpenSSL REQUIRED)
+target_link_libraries(tst_approval PRIVATE OpenSSL::Crypto)
 
 # The media bridge talks to MPRIS players over D-Bus, so its test registers a
 # fake player on a bus of its own. dbus-run-session gives it one — private to

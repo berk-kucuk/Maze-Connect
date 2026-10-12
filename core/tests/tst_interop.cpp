@@ -246,11 +246,16 @@ void TestInterop::capabilityWireNames() {
     // capabilities: advertising is "I implement this", enabling is "you may
     // use it". Pairing is the deliberate act for everything bounded by a
     // fixed table or the owner's own file; full remote control is not
-    // bounded that way, so it is the one exception, switched on per device.
+    // bounded that way, and approval — a phone that can unlock this screen —
+    // is a second way in. Those two are switched on per device.
     QVERIFY(supportedCapabilities().testFlag(Capability::SystemStatus));
     QVERIFY(defaultEnabledCapabilities().testFlag(Capability::SystemStatus));
     QCOMPARE(defaultEnabledCapabilities(), supportedCapabilities() & ~optInCapabilities());
-    QCOMPARE(optInCapabilities(), Capabilities(Capability::RemoteInput));
+    QCOMPARE(optInCapabilities(),
+             Capabilities(Capability::RemoteInput) | Capability::Approval);
+    QCOMPARE(capabilityName(Capability::Approval), QStringLiteral("approval"));
+    QCOMPARE(capabilityName(Capability::LockPhone), QStringLiteral("lockPhone"));
+    QVERIFY(defaultEnabledCapabilities().testFlag(Capability::LockPhone));
 
     // Computer -> phone only, but still matched as a string like every
     // other capability, and still granted by pairing like the rest.

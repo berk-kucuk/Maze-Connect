@@ -24,6 +24,26 @@ The Android counterpart lives at
   notification; a link opens only if you click it.
 - **Send files, and your clipboard,** to a particular phone.
 - The tray tooltip lists linked phones and their battery.
+- **Lock a phone** from its card, if its owner allowed that on the phone.
+- **History** of what paired phones did here — pairings, permissions,
+  commands, killswitches, remote control, unlocks, files — kept across
+  restarts in an owner-only file (names and outcomes, never content).
+
+**Unlock and approve with the phone's fingerprint**
+
+- **Unlock this computer** from the phone, with a fingerprint each time. The
+  phone's approval key never leaves its secure hardware; it is allowed per
+  phone in Settings after comparing its code, and switched off by itself if
+  that key ever changes.
+- **sudo and polkit** can ask the phone first (`pam_mazeconnect`): the
+  terminal shows a two-digit code, you type it on the phone and touch the
+  sensor; no phone, no answer or SSH means the password as before. Set up by
+  root, nothing is enabled on install:
+
+  ```
+  sudo maze-connect-approvers enroll
+  sudo maze-connect-approvers pam enable sudo     # and/or polkit
+  ```
 
 **On the phone, about the computer**
 

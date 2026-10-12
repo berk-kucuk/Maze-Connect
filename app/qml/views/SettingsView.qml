@@ -102,17 +102,178 @@ Flickable {
                     value: modelData.controlAllowed ? qsTr("Allowed") : qsTr("Not allowed")
                     showDot: true
                     state_: modelData.controlAllowed ? 2 : -1
-
-                    MazeButton {
-                        anchors.right: parent.right
-                        anchors.rightMargin: 110
-                        anchors.verticalCenter: parent.verticalCenter
+                    trailing: MazeButton {
                         text: controlPill.modelData.controlAllowed ? qsTr("Revoke") : qsTr("Allow")
                         destructive: controlPill.modelData.controlAllowed
                         onClicked: Backend.setRemoteControlAllowed(controlPill.modelData.deviceId,
                                                                    !controlPill.modelData.controlAllowed)
                     }
                 }
+            }
+        }
+
+        // ---- Unlock and approve with the phone ---------------------------
+        SectionLabel { text: qsTr("Unlock and approve with your phone") }
+
+        Text {
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: qsTr("A phone allowed here can unlock this screen — with your fingerprint, every time, on the phone. Set it up on the phone first (Settings › Approvals), check that the key code matches the one shown here, then allow it. If the phone ever sends a different key, it is switched off here until you allow it again.")
+            color: Theme.dim
+            font.family: Theme.fontSans
+            font.pixelSize: 12
+            lineHeight: 1.45
+        }
+
+        Column {
+            width: parent.width
+            spacing: 6
+
+            Repeater {
+                model: Backend.phones
+
+                Pill {
+                    id: approvalPill
+                    required property var modelData
+                    readonly property bool hasKey: modelData.approvalKeyCode !== ""
+                    label: modelData.name
+                    detail: hasKey ? qsTr("Key  %1").arg(modelData.approvalKeyCode)
+                                   : qsTr("Not set up on the phone yet")
+                    value: !hasKey ? qsTr("—")
+                         : modelData.approvalAllowed ? qsTr("Allowed") : qsTr("Not allowed")
+                    showDot: true
+                    state_: modelData.approvalAllowed ? 1 : -1
+                    trailing: MazeButton {
+                        visible: approvalPill.hasKey
+                        text: approvalPill.modelData.approvalAllowed ? qsTr("Revoke") : qsTr("Allow")
+                        primary: !approvalPill.modelData.approvalAllowed
+                        destructive: approvalPill.modelData.approvalAllowed
+                        onClicked: Backend.setApprovalAllowed(approvalPill.modelData.deviceId,
+                                                              !approvalPill.modelData.approvalAllowed)
+                    }
+                }
+            }
+        }
+
+        // sudo / polkit: root's to set up, so this shows where it stands and
+        // the exact commands for what is left — nothing here changes it.
+        SectionLabel { text: qsTr("sudo and administrator prompts") }
+
+        Text {
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: qsTr("sudo and polkit (Partition Manager, Discover, run0…) can ask the phone first. The prompt shows a two-digit code; type it on the phone and touch the sensor. No phone, no answer, or an SSH session — the password is asked as before.")
+            color: Theme.dim
+            font.family: Theme.fontSans
+            font.pixelSize: 12
+            lineHeight: 1.45
+        }
+
+        Column {
+            id: adminState
+            width: parent.width
+            spacing: 6
+
+            readonly property var st: Backend.adminApproval
+            readonly property var enrolled: st.enrolled || []
+
+            Pill {
+                label: qsTr("PAM module")
+                value: adminState.st.moduleInstalled ? qsTr("Installed") : qsTr("Not installed")
+                showDot: true
+                state_: adminState.st.moduleInstalled ? 1 : 0
+            }
+            Pill {
+                label: qsTr("Phones enrolled by root")
+                detail: adminState.enrolled.join("   ")
+                value: adminState.enrolled.length === 0 ? qsTr("None")
+                     : adminState.enrolled.length === 1 ? qsTr("1 phone")
+                     : qsTr("%1 phones").arg(adminState.enrolled.length)
+                showDot: true
+                state_: adminState.enrolled.length > 0 ? 1 : -1
+            }
+            Pill {
+                label: qsTr("sudo")
+                value: adminState.st.sudoEnabled ? qsTr("Asks the phone") : qsTr("Password only")
+                showDot: true
+                state_: adminState.st.sudoEnabled ? 1 : -1
+            }
+            Pill {
+                label: qsTr("polkit / run0")
+                value: adminState.st.polkitEnabled ? qsTr("Asks the phone") : qsTr("Password only")
+                showDot: true
+                state_: adminState.st.polkitEnabled ? 1 : -1
+            }
+            Pill {
+                visible: (adminState.st.relayError || "") !== ""
+                label: qsTr("Approval relay")
+                detail: adminState.st.relayError || ""
+                value: qsTr("Not running")
+                showDot: true
+                state_: 0
+                trailing: MazeButton {
+                    text: qsTr("Retry")
+                    onClicked: Backend.restartApprovalRelay()
+                }
+            }
+        }
+
+        // What is left to do, as commands to paste — only the missing steps.
+        Rectangle {
+            id: steps
+            readonly property var st: Backend.adminApproval
+            readonly property string commands: {
+                let lines = []
+                if ((st.enrolled || []).length === 0)
+                    lines.push("sudo maze-connect-approvers enroll")
+                if (!st.sudoEnabled)
+                    lines.push("sudo maze-connect-approvers pam enable sudo")
+                if (!st.polkitEnabled)
+                    lines.push("sudo maze-connect-approvers pam enable polkit")
+                return lines.join("\n")
+            }
+            visible: st.moduleInstalled === true && commands !== ""
+            width: parent.width
+            height: stepsColumn.implicitHeight + 24
+            radius: Theme.radiusPill
+            color: "transparent"
+            border.width: 1
+            border.color: Theme.hairline
+
+            Column {
+                id: stepsColumn
+                anchors.left: parent.left
+                anchors.right: copyButton.left
+                anchors.leftMargin: 14
+                anchors.rightMargin: 12
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 6
+
+                Text {
+                    text: qsTr("Still to do, in a terminal:")
+                    color: Theme.faint
+                    font.family: Theme.fontSans
+                    font.pixelSize: 11
+                }
+                Text {
+                    width: parent.width
+                    text: steps.commands
+                    textFormat: Text.PlainText
+                    color: Theme.text
+                    font.family: Theme.fontMono
+                    font.pixelSize: 11
+                    lineHeight: 1.5
+                    wrapMode: Text.WrapAnywhere
+                }
+            }
+
+            MazeButton {
+                id: copyButton
+                anchors.right: parent.right
+                anchors.rightMargin: 10
+                anchors.verticalCenter: parent.verticalCenter
+                text: qsTr("Copy")
+                onClicked: Backend.copyText(steps.commands)
             }
         }
 
@@ -170,7 +331,7 @@ Flickable {
         Text {
             width: parent.width
             wrapMode: Text.WordWrap
-            text: qsTr("Locks this computer's screen when the chosen phone drops off the network and does not come back within the delay — walk away with your phone and the desk locks behind you. It can only lock: a phone can never unlock anything. If this computer's own network drops, it locks too.")
+            text: qsTr("Locks this computer's screen when the chosen phone drops off the network and does not come back within the delay — walk away with your phone and the desk locks behind you. Coming back never unlocks anything; that takes your fingerprint (above). If this computer's own network drops, it locks too.")
             color: Theme.dim
             font.family: Theme.fontSans
             font.pixelSize: 12

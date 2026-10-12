@@ -27,6 +27,8 @@ enum class Capability : quint32 {
     Presenter = 0x800,   ///< a phone presses a fixed handful of slide keys
     ClipboardSync = 0x1000, ///< clipboards follow each other, when both owners switch it on
     SharedFolder = 0x2000,  ///< a phone browses and downloads from one shared folder
+    Approval = 0x4000,      ///< a phone's fingerprint unlocks this computer / approves sudo — **opt-in**
+    LockPhone = 0x8000,     ///< this computer locks a paired phone's screen
 };
 Q_DECLARE_FLAGS(Capabilities, Capability)
 Q_DECLARE_OPERATORS_FOR_FLAGS(Capabilities)
@@ -44,7 +46,8 @@ inline constexpr Capabilities supportedCapabilities() {
         | Capability::Commands | Capability::Ai | Capability::GuardControl
         | Capability::OpenOnPhone | Capability::Media | Capability::PhoneStatus
         | Capability::FindPhone | Capability::ShareText | Capability::RemoteInput
-        | Capability::Presenter | Capability::ClipboardSync | Capability::SharedFolder;
+        | Capability::Presenter | Capability::ClipboardSync | Capability::SharedFolder
+        | Capability::Approval | Capability::LockPhone;
 }
 
 /**
@@ -56,9 +59,14 @@ inline constexpr Capabilities supportedCapabilities() {
  * fixed table or a file the owner wrote; this is not, so it is not a default
  * — neither for a new pairing nor for an older pairing that has never heard
  * of it (see DeviceStore::load()).
+ *
+ * Approval is the other: a phone that can unlock this computer's screen is a
+ * second way in, and it has to be chosen for that phone, on this computer,
+ * after its approval key has been seen here (see docs/PROTOCOL.md § approval).
+ * A new approval key from the phone switches it back off.
  */
 inline constexpr Capabilities optInCapabilities() {
-    return Capabilities(Capability::RemoteInput);
+    return Capabilities(Capability::RemoteInput) | Capability::Approval;
 }
 
 /**

@@ -148,6 +148,8 @@ identity.
 | `presenter` | on | `inputSession` (mode `presenter`) → `inputState`*, `inputEvent` (slide keys only) |
 | `clipboardSync` | on, but each side's owner switch starts off | `clipboardSync` (both ways) |
 | `sharedFolder` | on | `folderList` → `folderListing`, `folderFetch` → `folderFetchResult` + a `fileOffer` |
+| `approval` | **off — opt-in per device on the computer**, and only once the phone has sent a key | `approvalKey`; `unlockRequest` → `approvalRequest` → `approvalResponse` → `approvalResult`; `approvalCancel` |
+| `lockPhone` | on — the phone owner's switch starts off | `lockPhone` → `lockPhoneResult` (computer → phone) |
 
 Every capability is granted by pairing and revocable per device on the
 computer. A message is only ever sent to a peer that advertised the
@@ -400,6 +402,136 @@ same ordered link. The phone accepts an offer without prompting only if its
 id was promised that way, by that computer, for a fetch it made; every other
 offer still asks.
 
+## approval
+
+A phone unlocks this computer, and approves `sudo`/polkit prompts on it,
+with its owner's fingerprint. Two keys are involved and they are not the
+same key: the phone's **identity** key carries the TLS link and signs with
+nobody present; its **approval** key lives in the Android Keystore
+(StrongBox where there is one), is created with
+`setUserAuthenticationRequired` and a zero timeout, is invalidated when a
+fingerprint is added, works only while the phone is unlocked, and signs one
+challenge per authentication through BiometricPrompt's `CryptoObject`.
+
+```json
+{ "v": 4, "t": "approvalKey", "c": 3, "key": "<base64 SPKI DER, P-256>" }
+{ "v": 4, "t": "approvalKey", "c": 3 }
+```
+
+Sent by the phone after every `hello`, and whenever its owner sets
+approvals up or removes them; no `key` withdraws it. The computer keeps it
+with the pairing. **Receiving a key grants nothing**: `approval` is an
+opt-in capability (`optInCapabilities()`), switched on per phone in the
+computer's Settings, next to the key's code (first 8 bytes of SHA-256 of
+the SPKI, `XXXX-XXXX-XXXX-XXXX`) which the phone shows too. A key that
+differs from the stored one switches `approval` back **off** for that phone
+and closes anything open; it is not possible for a key the owner did not
+look at to unlock anything. Keys that are not P-256, or carry trailing
+bytes, are refused. Five per device per minute.
+
+### What is signed
+
+```
+"maze-connect/approval/v1"
+  || lp(purpose) || lp(host) || lp(user) || lp(detail)
+  || lp(nonce)   || lp(code) || lp(issuedAt as decimal ASCII)
+  || lp(SHA-256 of the verifying computer's identity SPKI)
+```
+
+`lp(x)` is a 4-byte big-endian length then x; strings are UTF-8. ECDSA
+P-256 with SHA-256, DER-encoded (8–72 bytes). The last field the phone takes
+from **its own pin** for the link the request came over, never from the
+request — so an answer given to one computer is worthless to another.
+`core/src/crypto/Approval.cpp`, the phone's `ApprovalSigning.kt` and
+`pam/approval_core.c` build exactly these bytes; `tst_approval`,
+`ApprovalSigningTest` and `test_approval_core` all assert the digest
+`ecb44638…b7c7` for the same fixed challenge.
+
+### Unlocking the screen
+
+```json
+{ "v": 4, "t": "unlockRequest", "c": 7 }
+{ "v": 4, "t": "approvalRequest", "c": 12, "requestId": 3, "purpose": "unlock",
+  "host": "maze", "user": "berk", "detail": "Unlock the screen",
+  "nonce": "<32 bytes>", "issuedAt": 1790000000, "codeRequired": false }
+{ "v": 4, "t": "approvalResponse", "c": 8, "requestId": 3, "signature": "<DER>" }
+{ "v": 4, "t": "approvalResult", "c": 13, "requestId": 3, "ok": true }
+```
+
+* The phone asks; the computer never puts an unlock prompt on a phone by
+  itself, and the phone takes an `unlock` challenge only from the computer
+  it asked within the last 30 s.
+* Refused up front, with `approvalResult` `requestId: 0`, when the
+  capability is off, there is no key, the screen **is not locked** (no
+  fingerprint is asked for nothing), or the phone asked more than five
+  times in a minute.
+* The computer verifies with the stored key, over the challenge it made and
+  its own identity, checks again that the session is locked, and calls
+  logind's `Session.Unlock()` on its own session (or, for the daemon, the
+  user's display session) — a D-Bus call, no process, nothing from the phone
+  in it. One challenge per request id; a replayed answer finds nothing open.
+* `approvalCancel` closes a challenge: timeout (45 s), a newer request, the
+  key changing, the capability being revoked.
+
+### sudo and polkit (`pam_mazeconnect`)
+
+The same messages with `purpose` `sudo` or `polkit` and `codeRequired: true`,
+but the challenge is made — and the answer verified — by
+`pam_mazeconnect.so`, as root, not by this app:
+
+1. PAM makes a 32-byte nonce, takes the time, the host, the user, a detail
+   (`sudo · pts/3`) and a random two-digit **code**, and writes the code to
+   the terminal (or the polkit dialog). The code is **never sent**.
+2. It sends the rest to this app's relay (below), which forwards an
+   `approvalRequest` to every connected phone with `approval` on and a key.
+3. The owner types the code on the phone and touches the sensor; the phone
+   signs with the code it was given *by the owner*. The first signature is
+   handed to PAM; the other phones get `approvalCancel`.
+4. PAM verifies against the keys root enrolled in
+   `/etc/maze-connect/approvers/<user>` and the code it showed. A signature
+   over any other code does not verify, so something that only sees the
+   relay cannot get an approval for a `sudo` it started out of sight: the
+   owner never saw that code.
+5. PAM reports `verified`, the relay sends `approvalResult`.
+
+A phone refuses a `sudo`/`polkit` challenge that does not require a code,
+raises at most six a minute per computer, and shows one approval at a time.
+
+### The relay
+
+`$XDG_RUNTIME_DIR/maze-connect/approval.sock`, in a directory created 0700
+and refused if it is anyone else's or open to anyone else. Connections from
+uid 0 only (`SO_PEERCRED`), four at once, three seconds to send the request.
+
+```
+PAM → relay  {"v":1,"purpose":"sudo","host":"…","user":"…","detail":"…",
+              "nonce":"<b64>","issuedAt":n,"timeoutMs":30000}\n
+relay → PAM  OK <b64 signature> <b64 verifier fingerprint>\n
+             ERR <printable ASCII reason>\n
+PAM → relay  {"v":1,"verified":true|false}\n
+```
+
+The relay validates the request (purpose `sudo`/`polkit` only — never
+`unlock`; `user` must be the user it runs as; bounded, control-free
+strings; 32-byte nonce; `issuedAt` within five minutes; timeout 5–60 s) and
+answers `ERR` **at once** when no phone can approve, so sudo goes straight
+to the password. Its answer is fixed-form text so that the side running as
+root never parses JSON from a process it does not trust.
+
+## lockPhone
+
+```json
+{ "v": 4, "t": "lockPhone", "c": 5 }
+{ "v": 4, "t": "lockPhoneResult", "c": 9, "locked": true }
+{ "v": 4, "t": "lockPhoneResult", "c": 9, "locked": false, "error": "locking is switched off on this phone" }
+```
+
+The phone locks only if its owner switched it on **and** granted Maze
+Connect the device-admin `force-lock` policy (its only policy) in Android's
+own dialog; switching it off removes the grant. At most three a minute per
+computer. The computer takes a `lockPhoneResult` only while it has asked.
+The phone says afterwards which computer locked it.
+
 ## Scope
 
 v2 dropped notification mirroring, clipboard sync and ping/find-my-device:
@@ -408,3 +540,7 @@ file transfer, and — since desktop 1.2.0 / mobile 0.14.0 — its media
 players. Desktop 1.3.0 / mobile 0.15.0 added the phone's side: its status
 on the computer's dashboard, find-my-phone, and sharing text to the
 computer. Deferred: remote input, SMS.
+
+Desktop 1.5.0 / mobile 0.17.0 added `approval` (unlock and sudo/polkit with
+the phone's fingerprint) and `lockPhone`. Neither needed a version bump: a
+message only goes to a peer that advertised its capability.

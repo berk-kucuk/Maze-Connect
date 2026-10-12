@@ -1,6 +1,7 @@
 #include "Backend.h"
 
 #include "Autostart.h"
+#include "mazeconnect/core/Approval.h"
 #include "mazeconnect/core/Limits.h"
 
 #include <QClipboard>
@@ -17,6 +18,9 @@
 #include <QProcess>
 #include <QSettings>
 #include <QUrl>
+
+#include <pwd.h>
+#include <unistd.h>
 
 using namespace mazeconnect::core;
 
@@ -315,6 +319,44 @@ Backend::Backend(QObject *parent) : QObject(parent), m_manager(dataDirectory()) 
             [this](const QString &, quint32 transferId, qint64 received, qint64 total) {
                 m_transfers.progressed(transferId, received, total);
             });
+
+    // ---- Approval and the audit log -----------------------------------------
+    connect(&m_manager, &DeviceManager::auditRecorded, this, &Backend::auditChanged);
+    connect(&m_manager, &DeviceManager::approvalHandled, this,
+            [this](const QString &deviceId, const QString &purpose, bool ok,
+                   const QString &detail) {
+                const QString name = deviceName(deviceId);
+                QString title;
+                if (purpose == QLatin1StringView("unlock")) {
+                    title = ok ? tr("Unlocked by %1").arg(name)
+                               : tr("Unlock from %1 refused").arg(name);
+                } else {
+                    title = ok ? tr("%1 approved %2").arg(name, purpose)
+                               : tr("%1 did not approve %2").arg(name, purpose);
+                }
+                // Every approval is announced on the machine it opened, and a
+                // refusal too: an attempt nobody made is worth knowing about.
+                m_activity.append(ActivityLog::Security, title, detail);
+                emit notificationRequested(title, detail, QUrl());
+            });
+    connect(&m_manager, &DeviceManager::approvalKeyChanged, this, [this](const QString &id) {
+        const bool withdrawn = m_manager.approvalKey(id).isEmpty();
+        const QString name = deviceName(id);
+        const QString title = withdrawn ? tr("%1 stopped offering approvals").arg(name)
+                                        : tr("%1 has a new approval key").arg(name);
+        const QString body = withdrawn
+            ? tr("It can no longer unlock this computer.")
+            : tr("Unlocking with it is off until you allow it again in Settings. "
+                 "If you did not just set it up on the phone, leave it off.");
+        m_activity.append(ActivityLog::Security, title, body);
+        emit notificationRequested(title, body, QUrl());
+        emit phonesChanged();
+    });
+    connect(&m_manager, &DeviceManager::phoneLockAnswered, this,
+            [this](const QString &deviceId, bool locked, const QString &error) {
+                setStatus(locked ? tr("%1 is locked").arg(deviceName(deviceId))
+                                 : tr("%1: %2").arg(deviceName(deviceId), error));
+            });
 }
 
 bool Backend::start() {
@@ -326,7 +368,76 @@ bool Backend::start() {
     }
     m_devices.setManager(&m_manager);
     emit listenAddressChanged();
+
+    // The socket pam_mazeconnect asks through. Failing here costs only the
+    // sudo/polkit approval, so it is reported, not fatal — and retried.
+    restartApprovalRelay();
+    m_relayWatchdog.setInterval(30000);
+    m_relayWatchdog.setTimerType(Qt::VeryCoarseTimer);
+    connect(&m_relayWatchdog, &QTimer::timeout, this, [this] {
+        ApprovalRelay *relay = m_manager.approvalRelay();
+        if (!relay->isListening() || !QFileInfo::exists(relay->socketPath())) {
+            restartApprovalRelay();
+        }
+    });
+    m_relayWatchdog.start();
+
+    // Debounced: one `pam enable` touches several files in a row.
+    m_adminRefresh.setSingleShot(true);
+    m_adminRefresh.setInterval(300);
+    connect(&m_adminRefresh, &QTimer::timeout, this, [this] {
+        watchAdminPaths();
+        refreshAdminApproval();
+    });
+    connect(&m_adminWatcher, &QFileSystemWatcher::directoryChanged, this,
+            [this] { m_adminRefresh.start(); });
+    connect(&m_adminWatcher, &QFileSystemWatcher::fileChanged, this,
+            [this] { m_adminRefresh.start(); });
+    watchAdminPaths();
+    refreshAdminApproval();
     return true;
+}
+
+void Backend::restartApprovalRelay() {
+    QString error;
+    const QString runtime = qEnvironmentVariable("XDG_RUNTIME_DIR");
+    const bool wasFailing = !m_relayError.isEmpty();
+    if (m_manager.startApprovalRelay(runtime, &error)) {
+        if (wasFailing) {
+            m_activity.append(ActivityLog::Info, tr("Approval relay started"));
+        }
+        m_relayError.clear();
+    } else {
+        if (error.isEmpty()) {
+            error = runtime.isEmpty() ? tr("XDG_RUNTIME_DIR is not set") : tr("unknown error");
+        }
+        // Said once per distinct failure, not every half-minute.
+        if (error != m_relayError) {
+            m_activity.append(ActivityLog::Security, tr("Approval relay not started"), error);
+        }
+        m_relayError = error;
+    }
+    refreshAdminApproval();
+}
+
+void Backend::watchAdminPaths() {
+    // A path that does not exist yet (no phone enrolled) cannot be watched;
+    // its parent is, and this is called again when the parent changes.
+    const QStringList wanted = {
+        QStringLiteral("/etc/pam.d"),
+        QStringLiteral("/etc/maze-connect"),
+        QStringLiteral("/etc/maze-connect/approvers"),
+        QStringLiteral("/etc"),
+    };
+    QStringList missing;
+    for (const QString &path : wanted) {
+        if (QFileInfo(path).isDir() && !m_adminWatcher.directories().contains(path)) {
+            missing << path;
+        }
+    }
+    if (!missing.isEmpty()) {
+        m_adminWatcher.addPaths(missing);
+    }
 }
 
 QString Backend::deviceName() const {
@@ -549,6 +660,13 @@ QVariantList Backend::phones() const {
         entry.insert(QStringLiteral("controlAllowed"),
                      device.enabledCapabilities.testFlag(Capability::RemoteInput));
         entry.insert(QStringLiteral("controlling"), m_remoteController == device.deviceId);
+        entry.insert(QStringLiteral("canLock"),
+                     m_manager.allows(device.deviceId, Capability::LockPhone));
+        entry.insert(QStringLiteral("approvalKeyCode"),
+                     device.approvalKey.isEmpty() ? QString()
+                                                  : approval::keyCode(device.approvalKey));
+        entry.insert(QStringLiteral("approvalAllowed"),
+                     device.enabledCapabilities.testFlag(Capability::Approval));
         list.append(entry);
     }
     return list;
@@ -958,10 +1076,11 @@ bool Backend::createExampleCommands() {
     //
     //  * **Anything with a consequence carries "confirm".** Reading the disk
     //    usage does not; suspending, rebooting and powering off do.
-    //  * **`unlock` is confirmed even though `lock` is not.** Locking adds a
-    //    protection, unlocking removes one — and it is the entry most worth
-    //    deleting outright if the machine sits somewhere other people can
-    //    reach it.
+    //  * **There is no `unlock` entry, and there should not be one.** A
+    //    command runs on a phone's word alone; `loginctl unlock-session` from
+    //    here would let anyone holding an unlocked phone open this screen.
+    //    Unlocking is the phone's Approval feature instead, which needs the
+    //    owner's fingerprint for every unlock and is switched on per phone.
     //
     // Four entries start "pinned" — lock, uptime, disk, mute — so the
     // phone's home-screen widget has something the moment this file is
@@ -980,12 +1099,6 @@ bool Backend::createExampleCommands() {
     "argv": ["loginctl", "lock-session"],
     "confirm": false,
     "pinned": true
-  },
-  {
-    "id": "unlock",
-    "label": "Unlock screen",
-    "argv": ["loginctl", "unlock-session"],
-    "confirm": true
   },
   {
     "id": "uptime",
@@ -1189,4 +1302,95 @@ void Backend::setAutostartEnabled(bool enabled) {
         emit statusMessageChanged();
     }
     emit autostartChanged();
+}
+
+// ---- Approval -----------------------------------------------------------------
+
+void Backend::setApprovalAllowed(const QString &deviceId, bool allowed) {
+    if (!m_manager.setCapabilityEnabled(deviceId, Capability::Approval, allowed)) {
+        setStatus(tr("%1 has not set up approvals yet — on the phone: Settings › Approvals.")
+                      .arg(deviceName(deviceId)));
+        return;
+    }
+    m_activity.append(ActivityLog::Security,
+                      allowed ? tr("%1 may unlock this computer").arg(deviceName(deviceId))
+                              : tr("%1 may no longer unlock this computer")
+                                    .arg(deviceName(deviceId)),
+                      allowed ? approval::keyCode(m_manager.approvalKey(deviceId)) : QString());
+    emit phonesChanged();
+}
+
+void Backend::refreshAdminApproval() {
+    QVariantMap state;
+    bool installed = false;
+    for (const char *dir : {"/usr/lib/security", "/usr/lib64/security", "/lib/security"}) {
+        installed = installed
+            || QFile::exists(QStringLiteral("%1/pam_mazeconnect.so").arg(QLatin1StringView(dir)));
+    }
+    const auto enabledIn = [](const QString &path) {
+        QFile file(path);
+        return file.open(QIODevice::ReadOnly) && file.readAll().contains("pam_mazeconnect.so");
+    };
+    QStringList enrolled;
+    if (const struct passwd *pw = ::getpwuid(::getuid())) {
+        QFile file(QStringLiteral("/etc/maze-connect/approvers/%1")
+                       .arg(QString::fromLocal8Bit(pw->pw_name)));
+        if (file.open(QIODevice::ReadOnly)) {
+            const QList<QByteArray> lines = file.readAll().split('\n');
+            for (const QByteArray &line : lines) {
+                if (line.isEmpty() || line.startsWith('#')) {
+                    continue;
+                }
+                const QByteArray key = QByteArray::fromBase64(
+                    line.split(' ').first(),
+                    QByteArray::Base64Encoding | QByteArray::AbortOnBase64DecodingErrors);
+                if (approval::isAcceptableKey(key)) {
+                    enrolled << approval::keyCode(key);
+                }
+            }
+        }
+    }
+    state.insert(QStringLiteral("moduleInstalled"), installed);
+    state.insert(QStringLiteral("sudoEnabled"), enabledIn(QStringLiteral("/etc/pam.d/sudo")));
+    state.insert(QStringLiteral("polkitEnabled"),
+                 enabledIn(QStringLiteral("/etc/pam.d/polkit-1")));
+    state.insert(QStringLiteral("enrolled"), enrolled);
+    state.insert(QStringLiteral("relayError"), m_relayError);
+    m_adminApproval = state;
+    emit adminApprovalChanged();
+}
+
+void Backend::copyText(const QString &text) {
+    QGuiApplication::clipboard()->setText(text);
+    setStatus(tr("Copied."));
+}
+
+void Backend::lockPhone(const QString &deviceId) {
+    if (m_manager.lockPhone(deviceId)) {
+        setStatus(tr("Asking %1 to lock…").arg(deviceName(deviceId)));
+    } else {
+        setStatus(tr("%1 cannot be locked from here right now.").arg(deviceName(deviceId)));
+    }
+}
+
+QVariantList Backend::auditEntries() const {
+    QVariantList list;
+    const auto entries = m_manager.auditLog().recent(300);
+    for (const AuditLog::Entry &entry : entries) {
+        QVariantMap row;
+        row.insert(QStringLiteral("at"),
+                   entry.at.toLocalTime().toString(QStringLiteral("yyyy-MM-dd HH:mm")));
+        row.insert(QStringLiteral("name"),
+                   entry.deviceName.isEmpty() ? entry.deviceId : entry.deviceName);
+        row.insert(QStringLiteral("action"), entry.action);
+        row.insert(QStringLiteral("detail"), entry.detail);
+        row.insert(QStringLiteral("ok"), entry.ok);
+        list.append(row);
+    }
+    return list;
+}
+
+void Backend::clearAudit() {
+    m_manager.clearAuditLog();
+    emit auditChanged();
 }

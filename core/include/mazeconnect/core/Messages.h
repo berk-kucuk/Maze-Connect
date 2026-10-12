@@ -61,6 +61,14 @@ enum class MessageType {
     ClipboardSync,  ///< either way: the sender's clipboard changed
     FolderPreview,  ///< phone -> computer: a small picture of this shared file
     FolderPreviewResult, ///< computer -> phone: that picture (JPEG), or why not
+    ApprovalKey,    ///< phone -> computer: the phone's biometric-bound approval key, or its withdrawal
+    UnlockRequest,  ///< phone -> computer: "I want to unlock you" — answered with an approvalRequest
+    ApprovalRequest,///< computer -> phone: a fresh challenge to sign after the owner's fingerprint
+    ApprovalResponse, ///< phone -> computer: the signature, or that the owner declined
+    ApprovalResult, ///< computer -> phone: whether the signature did what it was for
+    ApprovalCancel, ///< computer -> phone: that challenge is no longer open
+    LockPhone,      ///< computer -> phone: lock your screen now
+    LockPhoneResult,///< phone -> computer: whether it locked, or why not
 };
 
 /**
@@ -109,6 +117,11 @@ public:
 
     /// Base64 field decoded to exactly @p expectedSize bytes, or empty.
     QByteArray binary(QLatin1StringView key, int expectedSize) const;
+
+    /// Base64 field decoded to between @p minSize and @p maxSize bytes, or
+    /// empty. For values whose encoding has no fixed length — a DER
+    /// signature, an SPKI key. The encoded text is bounded before decoding.
+    QByteArray binary(QLatin1StringView key, int minSize, int maxSize) const;
 
     /// String array, each element bounded; capped in length.
     QStringList stringList(QLatin1StringView key, int maxItems, int maxChars) const;
@@ -329,6 +342,31 @@ public:
     static Message folderPreviewResult(quint64 counter, quint32 requestId, const QString &path,
                                        const QByteArray &jpeg, int width, int height,
                                        const QString &error);
+
+    /// Built by the phone; here so tests can make it. An empty @p key withdraws it.
+    static Message approvalKey(quint64 counter, const QByteArray &key);
+    /// Built by the phone; here so tests can make it.
+    static Message unlockRequest(quint64 counter);
+
+    /**
+     * A challenge for the phone's approval key. Everything the phone shows its
+     * owner is in here, and all of it is signed back — see approval::Challenge.
+     * The code, when there is one, is **not**: the owner types the one shown
+     * on this computer, and only a signature over the right code verifies.
+     */
+    static Message approvalRequest(quint64 counter, quint32 requestId, const QString &purpose,
+                                   const QString &host, const QString &user,
+                                   const QString &detail, const QByteArray &nonce,
+                                   qint64 issuedAt, bool codeRequired);
+    /// Built by the phone; here so tests can make it. Exactly one of the two.
+    static Message approvalResponse(quint64 counter, quint32 requestId,
+                                    const QByteArray &signature, const QString &error);
+    static Message approvalResult(quint64 counter, quint32 requestId, bool ok,
+                                  const QString &error);
+    static Message approvalCancel(quint64 counter, quint32 requestId, const QString &reason);
+    static Message lockPhone(quint64 counter);
+    /// Built by the phone; here so tests can make it.
+    static Message lockPhoneResult(quint64 counter, bool locked, const QString &error);
 
     static QString typeName(MessageType type);
     static MessageType typeFromName(const QString &name);

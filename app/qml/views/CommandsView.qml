@@ -131,7 +131,7 @@ Item {
     }
 
     Item {
-        id: header
+        id: topBar
         width: parent.width
         height: Math.max(sectionLabel.implicitHeight, headerButtons.implicitHeight)
 
@@ -205,7 +205,7 @@ Item {
 
     // ---- The list --------------------------------------------------------
     ListView {
-        anchors.top: header.bottom
+        anchors.top: topBar.bottom
         anchors.topMargin: 14
         anchors.left: parent.left
         anchors.right: parent.right

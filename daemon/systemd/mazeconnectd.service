@@ -41,6 +41,11 @@ RestartSec=5
 StateDirectory=mazeconnect
 StateDirectoryMode=0700
 
+# $XDG_RUNTIME_DIR/maze-connect, where pam_mazeconnect finds the approval
+# relay. ProtectSystem=strict below makes everything else read-only.
+RuntimeDirectory=maze-connect
+RuntimeDirectoryMode=0700
+
 # Sandboxing. This process holds the long-term identity key and the mTLS
 # listen socket, and parses untrusted LAN input, so it gets the tightest
 # confinement the app has. See docs/THREAT_MODEL.md.

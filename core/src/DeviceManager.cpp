@@ -17,11 +17,15 @@
 #include <QFileInfo>
 #include <QRandomGenerator>
 #include <QStandardPaths>
+#include <QSysInfo>
 #include <QPointer>
 #include <QThreadPool>
 #include <QUuid>
 
 #include <utility>
+
+#include <pwd.h>
+#include <unistd.h>
 
 namespace mazeconnect::core {
 
@@ -37,6 +41,7 @@ constexpr QLatin1StringView kIdentityCertFile("identity.crt");
 constexpr QLatin1StringView kDeviceIdFile("device-id");
 constexpr QLatin1StringView kDevicesFile("devices.json");
 constexpr QLatin1StringView kInboxDir("inbox");
+constexpr QLatin1StringView kAuditFile("audit.jsonl");
 
 /// Chunk size for outgoing files — comfortably under the data-frame cap
 /// once the 4-byte transfer id is added.
@@ -58,6 +63,24 @@ QString hexKey(const QByteArray &publicKey) {
     return QString::fromLatin1(Identity::fingerprintOf(publicKey).toHex());
 }
 
+QString localUserName() {
+    const struct passwd *pw = ::getpwuid(::getuid());
+    return pw && pw->pw_name ? QString::fromLocal8Bit(pw->pw_name) : QString();
+}
+
+/// This machine's name as an approval shows it: bounded, and only the
+/// characters a hostname has, so it cannot be refused by the phone's own
+/// checks and leave the owner with a prompt that never comes.
+QString approvalHostName() {
+    QString host = QSysInfo::machineHostName().left(limits::kMaxApprovalHostChars);
+    for (QChar &c : host) {
+        if (c.unicode() < 0x21 || c.unicode() > 0x7E) {
+            c = QLatin1Char('?');
+        }
+    }
+    return host.isEmpty() ? QStringLiteral("localhost") : host;
+}
+
 } // namespace
 
 DeviceManager::DeviceManager(QString dataDir, QObject *parent)
@@ -70,6 +93,19 @@ DeviceManager::DeviceManager(QString dataDir, QObject *parent)
 
     m_input = std::make_unique<RemoteInput>();
     wireRemoteInput();
+
+    m_audit = AuditLog(QDir(m_dataDir).filePath(kAuditFile));
+    m_session = std::make_unique<LogindSessionControl>();
+    connect(&m_relay, &ApprovalRelay::requested, this, &DeviceManager::onRelayRequested);
+    connect(&m_relay, &ApprovalRelay::finished, this, &DeviceManager::onRelayFinished);
+    connect(&m_relay, &ApprovalRelay::abandoned, this, &DeviceManager::onRelayAbandoned);
+
+    // Files are recorded by name only, never by content.
+    connect(this, &DeviceManager::fileReceived, this,
+            [this](const QString &deviceId, quint32, const QString &path) {
+                recordAudit(deviceId, QStringLiteral("Received a file"),
+                            QFileInfo(path).fileName());
+            });
 
     // An unanswered request is a refusal after a minute: a prompt left up on
     // an empty desk must not be answerable later by whoever sits down.
@@ -148,6 +184,12 @@ DeviceManager::DeviceManager(QString dataDir, QObject *parent)
                 if (!requester.isEmpty()) {
                     emit guardChangedRemotely(requester, name, requestedEnabled,
                                               guardStateName(state), error);
+                    recordAudit(requester,
+                                QStringLiteral("Killswitch %1 %2")
+                                    .arg(name, requestedEnabled ? QStringLiteral("allowed")
+                                                                : QStringLiteral("blocked")),
+                                error.isEmpty() ? guardStateName(state) : error,
+                                error.isEmpty());
                 }
 
                 if (requester.isEmpty()) {
@@ -172,11 +214,15 @@ DeviceManager::DeviceManager(QString dataDir, QObject *parent)
     connect(&m_commands, &CommandRunner::finished, this,
             [this](quint32 requestId, const QString &id, int exitCode, const QString &output,
                    bool timedOut) {
-                Q_UNUSED(timedOut);
                 const auto request = m_commandRequests.take(requestId);
                 if (request.deviceId.isEmpty()) {
                     return;
                 }
+                // The id and how it ended; never the output.
+                recordAudit(request.deviceId, QStringLiteral("Ran command %1").arg(id),
+                            timedOut ? QStringLiteral("timed out")
+                                     : QStringLiteral("exit %1").arg(exitCode),
+                            !timedOut && exitCode == 0);
                 Connection *connection = connectionForDevice(request.deviceId);
                 if (!connection) {
                     return;
@@ -355,6 +401,11 @@ bool DeviceManager::start(const QString &deviceName, const QString &deviceType) 
 }
 
 void DeviceManager::stop() {
+    // Tell PAM no answer is coming, and do not let the relay call back into
+    // links that are about to go.
+    m_relay.disconnect(this);
+    m_relay.stop();
+    m_approvals.clear();
     m_reconnectTimer.stop();
     m_outboundPending.clear();
     for (const auto &link : m_links) {
@@ -660,6 +711,23 @@ void DeviceManager::forgetPendingWork(const QString &deviceId) {
     m_media.setWatching(!m_mediaSubscribers.isEmpty());
 
     m_phoneStatusAwaiting.remove(deviceId);
+    m_lockPhoneAwaiting.remove(deviceId);
+    // An approval open on this phone can no longer be answered from it.
+    // Collected first: closing one edits the table being walked.
+    QList<quint32> orphaned;
+    for (auto it = m_approvals.begin(); it != m_approvals.end(); ++it) {
+        if (!it->devices.remove(deviceId)) {
+            continue;
+        }
+        // A relayed one whose signature already went to PAM is PAM's to
+        // finish; anything else with nobody left to answer is over.
+        if (it->devices.isEmpty() && it->answeredBy.isEmpty()) {
+            orphaned.append(it.key());
+        }
+    }
+    for (const quint32 id : orphaned) {
+        closeApproval(id, tr("the phone disconnected"));
+    }
     m_shareTextRate.remove(deviceId);
     m_clipboardRate.remove(deviceId);
     m_folderRate.remove(deviceId);
@@ -1036,6 +1104,7 @@ void DeviceManager::handleMessage(Connection *connection, const Message &message
     case MessageType::Unpair: {
         const QByteArray key = connection->peerPublicKey();
         const PairedDevice device = m_store.deviceForKey(key);
+        recordAudit(device.deviceId, QStringLiteral("Unpaired by the device"));
         m_store.remove(key);
         emit pairingCompleted(device.deviceId, false);
         emit deviceListChanged();
@@ -1599,6 +1668,8 @@ void DeviceManager::handleMessage(Connection *connection, const Message &message
         if (transferId == 0) {
             connection->send(Message::folderFetchResult(connection->nextCounter(), requestId, 0,
                                                         tr("that file could not be sent")));
+        } else {
+            recordAudit(link->deviceId, QStringLiteral("Downloaded from the shared folder"), path);
         }
         break;
     }
@@ -1680,6 +1751,37 @@ void DeviceManager::handleMessage(Connection *connection, const Message &message
         break;
     }
 
+    case MessageType::ApprovalKey:
+        handleApprovalKey(link, message);
+        break;
+
+    case MessageType::UnlockRequest:
+        handleUnlockRequest(link);
+        break;
+
+    case MessageType::ApprovalResponse:
+        handleApprovalResponse(link, message);
+        break;
+
+    case MessageType::LockPhoneResult: {
+        if (!m_lockPhoneAwaiting.remove(link->deviceId)
+            || !capabilityAllowed(*link, Capability::LockPhone)) {
+            qCInfo(lcLink) << "ignoring unsolicited lock result from" << link->deviceId;
+            break;
+        }
+        const bool locked = message.boolean(QLatin1StringView("locked"));
+        const QString error = message.string(QLatin1StringView("error"), 200);
+        recordAudit(link->deviceId, QStringLiteral("Asked the phone to lock"),
+                    locked ? QStringLiteral("locked") : error, locked);
+        emit phoneLockAnswered(link->deviceId, locked, error);
+        break;
+    }
+
+    case MessageType::ApprovalRequest:
+    case MessageType::ApprovalResult:
+    case MessageType::ApprovalCancel:
+    case MessageType::LockPhone:
+        // Computer -> phone only.
     case MessageType::InputState:
     case MessageType::FolderListing:
     case MessageType::FolderFetchResult:
@@ -1861,6 +1963,7 @@ void DeviceManager::finalizePairing(const std::shared_ptr<Link> &link) {
     }
 
     link->trusted = true;
+    recordAudit(deviceId, QStringLiteral("Paired"));
     emit pairingCompleted(deviceId, true);
     emit deviceConnected(deviceId);
     emit deviceListChanged();
@@ -1970,6 +2073,7 @@ bool DeviceManager::unpair(const QString &deviceId) {
     if (!device.isValid()) {
         return false;
     }
+    recordAudit(deviceId, QStringLiteral("Unpaired on this computer"));
     if (Connection *connection = connectionForDevice(deviceId)) {
         Message message = Message::unpair(connection->nextCounter());
         connection->send(message);
@@ -1986,9 +2090,34 @@ bool DeviceManager::setCapabilityEnabled(const QString &deviceId, Capability cap
     if (!device.isValid()) {
         return false;
     }
+    // Approval means "this key may unlock": with no key there is nothing to
+    // say yes to, and a switch that is on but can never work misleads.
+    if (enabled && capability == Capability::Approval && device.approvalKey.isEmpty()) {
+        return false;
+    }
     Capabilities caps = device.enabledCapabilities;
+    if (caps.testFlag(capability) == enabled) {
+        return true;
+    }
     caps.setFlag(capability, enabled);
     const bool ok = m_store.update(device.publicKey, device.deviceName, caps);
+    if (ok) {
+        recordAudit(deviceId,
+                    QStringLiteral("Permission %1: %2")
+                        .arg(enabled ? QStringLiteral("allowed") : QStringLiteral("revoked"),
+                             capabilityName(capability)));
+    }
+    if (ok && !enabled && capability == Capability::Approval) {
+        QList<quint32> open;
+        for (auto it = m_approvals.cbegin(); it != m_approvals.cend(); ++it) {
+            if (it->devices.contains(deviceId) || it->answeredBy == deviceId) {
+                open.append(it.key());
+            }
+        }
+        for (const quint32 id : open) {
+            closeApproval(id, tr("switched off on the computer"));
+        }
+    }
     // A revocation takes effect now, not at the next session.
     if (ok && !enabled && m_input->owner() == deviceId
         && (capability == Capability::RemoteInput
@@ -2215,6 +2344,9 @@ bool DeviceManager::ringPhone(const QString &deviceId, bool ring) {
     }
     // Kept for a stop as well: its acknowledgement is what clears the state.
     m_findPhoneAwaiting.insert(deviceId);
+    if (ring) {
+        recordAudit(deviceId, QStringLiteral("Rang the phone"));
+    }
     return true;
 }
 
@@ -2345,6 +2477,12 @@ void DeviceManager::wireRemoteInput() {
                 if (Connection *connection = connectionForDevice(deviceId)) {
                     connection->send(
                         Message::inputState(connection->nextCounter(), active, modeName, error));
+                }
+                if (!deviceId.isEmpty()) {
+                    recordAudit(deviceId,
+                                active ? QStringLiteral("Remote control started (%1)").arg(modeName)
+                                       : QStringLiteral("Remote control ended"),
+                                error, error.isEmpty());
                 }
                 emit remoteInputChanged(deviceId, active, modeName, error);
             });
@@ -2484,6 +2622,384 @@ bool DeviceManager::connectToPairedAt(const QHostAddress &address, quint16 port,
 
     connection->connectToPeer(address, port);
     return true;
+}
+
+// ---- Audit ------------------------------------------------------------------
+
+void DeviceManager::recordAudit(const QString &deviceId, const QString &action,
+                                const QString &detail, bool ok) {
+    QString name = m_store.deviceForId(deviceId).deviceName;
+    if (name.isEmpty()) {
+        if (const auto link = linkForDevice(deviceId)) {
+            name = link->deviceName;
+        }
+    }
+    if (m_audit.record(deviceId, name, action, detail, ok)) {
+        emit auditRecorded();
+    }
+}
+
+// ---- Lock the phone ---------------------------------------------------------
+
+bool DeviceManager::lockPhone(const QString &deviceId) {
+    const auto link = linkForDevice(deviceId);
+    if (!link || !capabilityAllowed(*link, Capability::LockPhone)) {
+        return false;
+    }
+    if (!allowWindow(m_lockPhoneRate, deviceId, limits::kMaxPhoneLocksPerMinute, 60000)) {
+        return false;
+    }
+    if (!link->connection->send(Message::lockPhone(link->connection->nextCounter()))) {
+        return false;
+    }
+    m_lockPhoneAwaiting.insert(deviceId);
+    return true;
+}
+
+// ---- Approval ---------------------------------------------------------------
+
+bool DeviceManager::startApprovalRelay(const QString &runtimeDir, QString *error) {
+    return m_relay.start(runtimeDir, error);
+}
+
+QByteArray DeviceManager::approvalKey(const QString &deviceId) const {
+    return m_store.deviceForId(deviceId).approvalKey;
+}
+
+void DeviceManager::setSessionControlForTesting(SessionControl *session) {
+    m_session.reset(session);
+}
+
+QString DeviceManager::approvalLabel(approval::Purpose purpose) const {
+    switch (purpose) {
+    case approval::Purpose::Unlock:
+        return QStringLiteral("Unlock the screen");
+    case approval::Purpose::Sudo:
+        return QStringLiteral("Approve sudo");
+    case approval::Purpose::Polkit:
+        return QStringLiteral("Approve an administrator prompt");
+    }
+    return {};
+}
+
+void DeviceManager::handleApprovalKey(const std::shared_ptr<Link> &link, const Message &message) {
+    // Recording a key grants nothing — Approval is opt-in, and a change
+    // switches it off — so the only gate is that the phone speaks the
+    // feature at all. The rate limit keeps it from churning the store.
+    if (!link->peerCapabilities.testFlag(Capability::Approval)) {
+        return;
+    }
+    if (!allowWindow(m_approvalKeyRate, link->deviceId, limits::kMaxApprovalKeysPerMinute,
+                     60000)) {
+        qCInfo(lcLink) << "dropping approval key from" << link->deviceId << "(rate limit)";
+        return;
+    }
+    QByteArray key;
+    if (message.body().contains(QLatin1StringView("key"))) {
+        key = message.binary(QLatin1StringView("key"), Identity::kMinPublicKeySize,
+                             Identity::kMaxPublicKeySize);
+        if (!approval::isAcceptableKey(key)) {
+            qCWarning(lcLink) << "refusing an approval key that is not P-256 from"
+                              << link->deviceId;
+            return;
+        }
+    }
+    bool changed = false;
+    if (!m_store.setApprovalKey(link->connection->peerPublicKey(), key, &changed) || !changed) {
+        return;
+    }
+    // Nothing still open may be answered with a key the owner has not seen.
+    QList<quint32> open;
+    for (auto it = m_approvals.cbegin(); it != m_approvals.cend(); ++it) {
+        if (it->devices.contains(link->deviceId) || it->answeredBy == link->deviceId) {
+            open.append(it.key());
+        }
+    }
+    for (const quint32 id : open) {
+        closeApproval(id, tr("the phone's approval key changed"));
+    }
+    recordAudit(link->deviceId,
+                key.isEmpty() ? QStringLiteral("Approval key withdrawn")
+                              : QStringLiteral("New approval key"),
+                key.isEmpty() ? QString() : approval::keyCode(key));
+    emit approvalKeyChanged(link->deviceId);
+    emit deviceListChanged();
+}
+
+void DeviceManager::sendApprovalResult(const QString &deviceId, quint32 id, bool ok,
+                                       const QString &error) {
+    if (Connection *connection = connectionForDevice(deviceId)) {
+        connection->send(Message::approvalResult(connection->nextCounter(), id, ok, error));
+    }
+}
+
+void DeviceManager::handleUnlockRequest(const std::shared_ptr<Link> &link) {
+    const QString deviceId = link->deviceId;
+    if (!capabilityAllowed(*link, Capability::Approval) || approvalKey(deviceId).isEmpty()) {
+        sendApprovalResult(deviceId, 0, false,
+                           tr("this computer has not allowed your phone to unlock it — "
+                              "switch it on in Settings on the computer"));
+        return;
+    }
+    if (!allowWindow(m_unlockRate, deviceId, limits::kMaxUnlockRequestsPerMinute, 60000)) {
+        sendApprovalResult(deviceId, 0, false, tr("too many unlock requests — wait a minute"));
+        return;
+    }
+    // Asking for a fingerprint to unlock a screen that is not locked would
+    // teach the owner to touch the sensor for nothing.
+    QString error;
+    switch (m_session->state(&error)) {
+    case SessionControl::State::Locked:
+        break;
+    case SessionControl::State::Unlocked:
+        sendApprovalResult(deviceId, 0, false, tr("this computer is not locked"));
+        return;
+    case SessionControl::State::Unknown:
+        sendApprovalResult(deviceId, 0, false,
+                           error.isEmpty() ? tr("could not tell whether this computer is locked")
+                                           : error);
+        return;
+    }
+    // One unlock in the air per phone: a new request replaces the old one.
+    QList<quint32> previous;
+    for (auto it = m_approvals.cbegin(); it != m_approvals.cend(); ++it) {
+        if (it->relayId == 0 && it->devices.contains(deviceId)) {
+            previous.append(it.key());
+        }
+    }
+    for (const quint32 id : previous) {
+        closeApproval(id, tr("replaced by a newer request"));
+    }
+
+    approval::Challenge challenge;
+    challenge.purpose = approval::Purpose::Unlock;
+    challenge.host = approvalHostName();
+    challenge.user = localUserName().left(limits::kMaxApprovalUserChars);
+    challenge.detail = approvalLabel(challenge.purpose);
+    challenge.nonce = approval::newNonce();
+    challenge.issuedAt = QDateTime::currentSecsSinceEpoch();
+    if (challenge.nonce.isEmpty() || challenge.user.isEmpty()) {
+        sendApprovalResult(deviceId, 0, false, tr("could not make a challenge"));
+        return;
+    }
+    openApproval(challenge, {deviceId}, 0, limits::kApprovalTimeoutMs);
+}
+
+quint32 DeviceManager::openApproval(const approval::Challenge &challenge,
+                                    const QSet<QString> &devices, quint32 relayId,
+                                    int timeoutMs) {
+    ApprovalTicket ticket;
+    ticket.id = m_nextApprovalId++;
+    if (m_nextApprovalId == 0) {
+        m_nextApprovalId = 1;
+    }
+    ticket.challenge = challenge;
+    ticket.relayId = relayId;
+    const bool codeRequired = challenge.purpose != approval::Purpose::Unlock;
+    for (const QString &deviceId : devices) {
+        Connection *connection = connectionForDevice(deviceId);
+        if (!connection) {
+            continue;
+        }
+        if (connection->send(Message::approvalRequest(
+                connection->nextCounter(), ticket.id, approval::purposeName(challenge.purpose),
+                challenge.host, challenge.user, challenge.detail, challenge.nonce,
+                challenge.issuedAt, codeRequired))) {
+            ticket.devices.insert(deviceId);
+        }
+    }
+    if (ticket.devices.isEmpty()) {
+        if (relayId != 0) {
+            m_relay.fail(relayId, tr("no phone could be reached"));
+        }
+        return 0;
+    }
+    const quint32 id = ticket.id;
+    ticket.timer = std::make_shared<QTimer>();
+    ticket.timer->setSingleShot(true);
+    connect(ticket.timer.get(), &QTimer::timeout, this,
+            [this, id] { closeApproval(id, tr("nobody answered in time")); });
+    ticket.timer->start(timeoutMs);
+    m_approvals.insert(id, ticket);
+    return id;
+}
+
+void DeviceManager::closeApproval(quint32 id, const QString &reason) {
+    const auto it = m_approvals.find(id);
+    if (it == m_approvals.end()) {
+        return;
+    }
+    const ApprovalTicket ticket = *it;
+    m_approvals.erase(it);
+    if (ticket.timer) {
+        ticket.timer->stop();
+    }
+    for (const QString &deviceId : ticket.devices) {
+        if (Connection *connection = connectionForDevice(deviceId)) {
+            connection->send(Message::approvalCancel(connection->nextCounter(), id, reason));
+        }
+    }
+    // The phone that signed is owed an outcome, and this is it.
+    if (!ticket.answeredBy.isEmpty()) {
+        sendApprovalResult(ticket.answeredBy, id, false, reason);
+    }
+    if (ticket.relayId != 0) {
+        // Harmless if PAM already has its answer: fail() only reaches a
+        // request still waiting for one.
+        m_relay.fail(ticket.relayId, reason);
+    }
+}
+
+void DeviceManager::handleApprovalResponse(const std::shared_ptr<Link> &link,
+                                           const Message &message) {
+    const QString deviceId = link->deviceId;
+    const qint64 rawId = message.integer(QLatin1StringView("requestId"), 0xFFFFFFFFLL);
+    const auto it = rawId > 0 ? m_approvals.find(static_cast<quint32>(rawId)) : m_approvals.end();
+    // Only an answer to a challenge this phone was actually sent, and is
+    // still open on it, is looked at. Anything else is noise.
+    if (it == m_approvals.end() || !it->devices.contains(deviceId)) {
+        qCInfo(lcLink) << "ignoring unsolicited approval response from" << deviceId;
+        return;
+    }
+    const quint32 id = it.key();
+    const approval::Purpose purpose = it->challenge.purpose;
+    const QString purposeName = approval::purposeName(purpose);
+    // Revocation wins over an answer already on its way.
+    if (!capabilityAllowed(*link, Capability::Approval)) {
+        closeApproval(id, tr("switched off on the computer"));
+        return;
+    }
+
+    const QString declined = message.string(QLatin1StringView("error"), 200);
+    const QByteArray signature = message.binary(QLatin1StringView("signature"),
+                                                limits::kMinApprovalSignature,
+                                                limits::kMaxApprovalSignature);
+    if (signature.isEmpty()) {
+        it->devices.remove(deviceId);
+        recordAudit(deviceId, approvalLabel(purpose),
+                    declined.isEmpty() ? QStringLiteral("no signature") : declined, false);
+        emit approvalHandled(deviceId, purposeName, false,
+                             declined.isEmpty() ? tr("no signature") : declined);
+        if (it->devices.isEmpty() && it->answeredBy.isEmpty()) {
+            closeApproval(id, declined.isEmpty() ? tr("declined on the phone") : declined);
+        }
+        return;
+    }
+
+    const QByteArray verifier = Identity::fingerprintOf(m_identity.publicKey());
+
+    if (it->relayId != 0) {
+        // sudo/polkit: PAM verifies, against the code only it and the owner
+        // know. The first signature goes; the other phones are told it is
+        // over.
+        if (!it->answeredBy.isEmpty()) {
+            return;
+        }
+        it->answeredBy = deviceId;
+        const QSet<QString> others = it->devices - QSet<QString>{deviceId};
+        it->devices.clear();
+        for (const QString &other : others) {
+            if (Connection *connection = connectionForDevice(other)) {
+                connection->send(Message::approvalCancel(connection->nextCounter(), id,
+                                                         tr("answered on another device")));
+            }
+        }
+        m_relay.answer(it->relayId, signature, verifier, link->deviceName);
+        return;
+    }
+
+    // Unlock: verified here, with the key the owner switched on, over the
+    // challenge this computer made and the identity the phone pinned.
+    const approval::Challenge challenge = it->challenge;
+    it->devices.remove(deviceId);
+    closeApproval(id, QString());
+    const QByteArray key = approvalKey(deviceId);
+    if (!approval::verify(key, approval::signingInput(challenge, verifier), signature)) {
+        qCWarning(lcLink) << "approval signature from" << deviceId << "did not verify";
+        recordAudit(deviceId, approvalLabel(purpose), QStringLiteral("signature did not verify"),
+                    false);
+        emit securityAlert(tr("An unlock from %1 was refused").arg(link->deviceName),
+                           tr("Its signature did not verify against the approval key this "
+                              "computer has for it."));
+        sendApprovalResult(deviceId, id, false, tr("the signature did not verify"));
+        emit approvalHandled(deviceId, purposeName, false, tr("the signature did not verify"));
+        return;
+    }
+    QString error;
+    // Checked again: the screen may have been unlocked by hand meanwhile.
+    const SessionControl::State state = m_session->state(&error);
+    bool ok = false;
+    if (state == SessionControl::State::Unlocked) {
+        error = tr("this computer is not locked");
+    } else if (state == SessionControl::State::Locked) {
+        ok = m_session->unlock(&error);
+    }
+    if (!ok && error.isEmpty()) {
+        error = tr("the session could not be unlocked");
+    }
+    recordAudit(deviceId, approvalLabel(purpose), ok ? QStringLiteral("unlocked") : error, ok);
+    sendApprovalResult(deviceId, id, ok, error);
+    emit approvalHandled(deviceId, purposeName, ok, error);
+}
+
+void DeviceManager::onRelayRequested(const ApprovalRelay::Request &request) {
+    // Every phone that may approve, with a key the owner switched on, and a
+    // link up right now. PAM is told at once when there is none, so sudo
+    // goes straight to the password instead of waiting out a timeout.
+    QSet<QString> devices;
+    for (const auto &link : m_links) {
+        if (capabilityAllowed(*link, Capability::Approval)
+            && !approvalKey(link->deviceId).isEmpty()) {
+            devices.insert(link->deviceId);
+        }
+    }
+    if (devices.isEmpty()) {
+        m_relay.fail(request.id, tr("no phone that can approve is connected"));
+        return;
+    }
+    openApproval(request.challenge, devices, request.id,
+                 qMin(request.timeoutMs, limits::kApprovalTimeoutMs));
+}
+
+void DeviceManager::onRelayFinished(quint32 relayId, bool verified) {
+    for (auto it = m_approvals.begin(); it != m_approvals.end(); ++it) {
+        if (it->relayId != relayId) {
+            continue;
+        }
+        const quint32 id = it.key();
+        const QString deviceId = it->answeredBy;
+        const approval::Purpose purpose = it->challenge.purpose;
+        const QString detail = it->challenge.detail;
+        if (it->timer) {
+            it->timer->stop();
+        }
+        m_approvals.erase(it);
+        if (deviceId.isEmpty()) {
+            return;
+        }
+        const QString error = verified
+            ? QString()
+            : tr("not accepted — check the code, and that this phone is enrolled for "
+                 "administrator access");
+        recordAudit(deviceId, approvalLabel(purpose),
+                    verified ? detail : QStringLiteral("not accepted"), verified);
+        sendApprovalResult(deviceId, id, verified, error);
+        emit approvalHandled(deviceId, approval::purposeName(purpose), verified,
+                             verified ? detail : error);
+        return;
+    }
+}
+
+void DeviceManager::onRelayAbandoned(quint32 relayId) {
+    for (auto it = m_approvals.cbegin(); it != m_approvals.cend(); ++it) {
+        if (it->relayId == relayId) {
+            const quint32 id = it.key();
+            // The relay id is spent; closeApproval must not fail() it again.
+            m_approvals[id].relayId = 0;
+            closeApproval(id, tr("cancelled on the computer"));
+            return;
+        }
+    }
 }
 
 } // namespace mazeconnect::core

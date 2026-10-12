@@ -23,6 +23,8 @@ constexpr Entry kEntries[] = {
     {Capability::Presenter, "presenter"},
     {Capability::ClipboardSync, "clipboardSync"},
     {Capability::SharedFolder, "sharedFolder"},
+    {Capability::Approval, "approval"},
+    {Capability::LockPhone, "lockPhone"},
 };
 
 } // namespace

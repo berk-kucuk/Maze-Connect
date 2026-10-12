@@ -402,6 +402,11 @@ Rectangle {
                 enabled: card.connected && card.phone.canOpen === true
                 onClicked: Backend.sendClipboardTo(card.phone.deviceId)
             }
+            MazeButton {
+                text: qsTr("Lock")
+                enabled: card.connected && card.phone.canLock === true
+                onClicked: Backend.lockPhone(card.phone.deviceId)
+            }
         }
     }
 }

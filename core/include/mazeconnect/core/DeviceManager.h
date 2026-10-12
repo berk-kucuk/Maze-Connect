@@ -12,6 +12,9 @@
 #include <functional>
 #include <memory>
 
+#include "mazeconnect/core/Approval.h"
+#include "mazeconnect/core/ApprovalRelay.h"
+#include "mazeconnect/core/AuditLog.h"
 #include "mazeconnect/core/Beacon.h"
 #include "mazeconnect/core/Connection.h"
 #include "mazeconnect/core/DeviceStore.h"
@@ -24,6 +27,7 @@
 #include "mazeconnect/core/RemoteInput.h"
 #include "mazeconnect/core/SharedFolder.h"
 #include "mazeconnect/core/Server.h"
+#include "mazeconnect/core/SessionControl.h"
 #include "mazeconnect/core/StatusProvider.h"
 
 namespace mazeconnect::core {
@@ -258,6 +262,36 @@ public:
      */
     void setInputBackendForTesting(InputBackend *backend);
 
+    // ---- Approval: unlock with the phone, sudo/polkit from the phone ------
+
+    /**
+     * Listen for pam_mazeconnect under @p runtimeDir (normally
+     * $XDG_RUNTIME_DIR). Separate from start() so that only the one process
+     * that serves this user — the window or the daemon — takes the socket,
+     * and so tests can point it at a directory of their own.
+     */
+    bool startApprovalRelay(const QString &runtimeDir, QString *error = nullptr);
+    ApprovalRelay *approvalRelay() { return &m_relay; }
+
+    /// The approval key @p deviceId sent, or empty.
+    QByteArray approvalKey(const QString &deviceId) const;
+
+    /// For tests: replace logind (takes ownership).
+    void setSessionControlForTesting(SessionControl *session);
+
+    /// Ask a phone to lock its screen. The answer is phoneLockAnswered().
+    bool lockPhone(const QString &deviceId);
+
+    // ---- Audit log --------------------------------------------------------
+
+    const AuditLog &auditLog() const { return m_audit; }
+    bool clearAuditLog() { return m_audit.clear(); }
+
+    /// Record something a device did, or this computer did to it, under its
+    /// current name. See AuditLog for what belongs here.
+    void recordAudit(const QString &deviceId, const QString &action,
+                     const QString &detail = QString(), bool ok = true);
+
 signals:
     void deviceListChanged();
     void deviceConnected(const QString &deviceId);
@@ -334,6 +368,23 @@ signals:
 
     /// A device's clipboard changed; bounded and cleaned like shareText.
     void clipboardReceived(const QString &deviceId, const QString &text);
+
+    /// A phone sent a new approval key (or withdrew it). Approval is off for
+    /// it until the owner looks at the new key and switches it back on.
+    void approvalKeyChanged(const QString &deviceId);
+
+    /**
+     * An approval finished: @p purpose is "unlock", "sudo" or "polkit".
+     * Raised whether it worked or not, so the screen it happened to can say.
+     */
+    void approvalHandled(const QString &deviceId, const QString &purpose, bool ok,
+                         const QString &detail);
+
+    /// Whether a phone locked itself when asked, and why not.
+    void phoneLockAnswered(const QString &deviceId, bool locked, const QString &error);
+
+    /// Something was added to the audit log.
+    void auditRecorded();
 
 private slots:
     void onIncomingConnection(mazeconnect::core::Connection *connection);
@@ -416,6 +467,43 @@ private:
     void finalizePairing(const std::shared_ptr<Link> &link);
 
     /**
+     * One open approval challenge.
+     *
+     * An unlock goes to the one phone that asked for it and is verified here.
+     * A sudo/polkit one goes to every phone that may approve, and the first
+     * signature is handed to PAM, which verifies it; here it is only carried.
+     */
+    struct ApprovalTicket {
+        quint32 id = 0;
+        approval::Challenge challenge;
+        QSet<QString> devices;   ///< phones it was sent to and still open on
+        quint32 relayId = 0;     ///< 0 for an unlock
+        QString answeredBy;      ///< the phone whose signature went to PAM
+        std::shared_ptr<QTimer> timer;
+    };
+    QHash<quint32, ApprovalTicket> m_approvals;
+    quint32 m_nextApprovalId = 1;
+
+    void handleApprovalKey(const std::shared_ptr<Link> &link, const Message &message);
+    void handleUnlockRequest(const std::shared_ptr<Link> &link);
+    void handleApprovalResponse(const std::shared_ptr<Link> &link, const Message &message);
+    void onRelayRequested(const ApprovalRelay::Request &request);
+    void onRelayFinished(quint32 relayId, bool verified);
+    void onRelayAbandoned(quint32 relayId);
+    quint32 openApproval(const approval::Challenge &challenge, const QSet<QString> &devices,
+                         quint32 relayId, int timeoutMs);
+    /// Close a ticket, telling every phone it is still open on.
+    void closeApproval(quint32 id, const QString &reason);
+    void sendApprovalResult(const QString &deviceId, quint32 id, bool ok, const QString &error);
+    QString approvalLabel(approval::Purpose purpose) const;
+
+    AuditLog m_audit;
+    ApprovalRelay m_relay;
+    std::unique_ptr<SessionControl> m_session;
+    /// Phones we asked to lock whose answer we will take.
+    QSet<QString> m_lockPhoneAwaiting;
+
+    /**
      * Dial a paired device we can see but are not linked to.
      *
      * Both devices see each other's beacons, so both would dial and we would
@@ -473,6 +561,9 @@ private:
     QHash<QString, RateWindow> m_previewRate;
     /// Previews being decoded per device, so one phone cannot fill the pool.
     QHash<QString, int> m_previewsInFlight;
+    QHash<QString, RateWindow> m_unlockRate;
+    QHash<QString, RateWindow> m_approvalKeyRate;
+    QHash<QString, RateWindow> m_lockPhoneRate;
     bool allowWindow(QHash<QString, RateWindow> &table, const QString &deviceId, int max,
                      int windowMs);
 

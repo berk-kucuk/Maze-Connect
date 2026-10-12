@@ -1120,3 +1120,158 @@ resim tekliflerine `thumbnail` ekleniyor. Biçim içerikten, boyut/piksel
 sınırı, ölçekli çözme, allocation limit, 280 KiB JPEG bütçesi. Testler:
 `previewsAreSmallJpegs`, `previewsRefuseWhatIsNotAPicture` ve link üzerinden
 önizleme/kaçış. **16/16 ctest.**
+
+## 1.5.0 — güvenlik: telefonla kilit açma, sudo/polkit onayı, telefonu kilitle, kalıcı denetim günlüğü
+
+Mobil 0.17.0 ile birlikte. Protokol sürümü **değişmedi** (v4): iki yeni
+yetenek (`approval`, `lockPhone`) ve sekiz mesaj, yalnızca yeteneği ilan eden
+karşı tarafa gidiyor. Ayrıntı: PROTOCOL.md § approval / lockPhone,
+THREAT_MODEL.md'deki dört yeni satır.
+
+- **Telefonla kilit açma** (`approval`, **opt-in**: `optInCapabilities()`'e
+  RemoteInput'un yanına eklendi). Telefonda ayrı bir *onay anahtarı*
+  (Keystore/StrongBox, her imza için parmak izi, yeni parmak izi eklenince
+  ölür). Telefon `approvalKey` gönderir; bilgisayar saklar ama **izin
+  vermez** — Ayarlar'da anahtar kodu (`XXXX-XXXX-XXXX-XXXX`, telefonda da
+  görünür) karşılaştırılıp *Allow* denir. Anahtar değişirse izin kendiliğinden
+  kapanır. Akış: telefon `unlockRequest` → bilgisayar kilitli değilse hemen
+  ret, kilitliyse 32 baytlık nonce'lu challenge → telefon parmak izi →
+  imza bilgisayarın **kendi kimliğine** bağlı → doğrulama → logind
+  `Session.Unlock()` (D-Bus, süreç yok). Varsayılan örnek komut listesinden
+  `unlock` (`loginctl unlock-session`) **çıkarıldı**: bir komut telefonun
+  sözüyle çalışır, parmak izi istemez.
+  **Mevcut kullanıcıların `commands.json` dosyasında bu girdi hâlâ olabilir;
+  dosya kullanıcının olduğu için dokunulmadı.**
+- **sudo / polkit onayı** — yeni `pam/` dizini:
+  - `pam_mazeconnect.so` (C, libpam + libcrypto, `-Werror -Wconversion`,
+    yalnızca `pam_sm_*` dışa açık). Challenge'ı ve iki haneli kodu **root**
+    üretir, kodu terminalde gösterir, **asla göndermez**; telefon sahibi kodu
+    telefona yazar, imza yalnızca o kodla doğrulanır. Anahtarlar yalnızca
+    `/etc/maze-connect/approvers/<kullanıcı>`'dan (dosya + üstündeki her dizin
+    root'un ve başkası yazamaz, `O_NOFOLLOW`). SSH/PAM_RHOST ve `PAM_SILENT`'te
+    devre dışı. Telefon yoksa röle hemen `ERR` der → sudo beklemeden parolaya
+    geçer. Sonuç root olarak journal'a (authpriv).
+  - Röle: uygulama `$XDG_RUNTIME_DIR/maze-connect/approval.sock` (0700) açar,
+    yalnızca uid 0 bağlanabilir; cevap JSON değil sabit metin (`OK …`/`ERR …`)
+    — root tarafı güvenilmeyen JSON ayrıştırmasın diye.
+  - `maze-connect-approvers`: `enroll` (kullanıcının devices.json'unu
+    **kullanıcı yetkisiyle** okur, kodu gösterir, "yes" ister), `list`,
+    `remove`, `pam status|enable|disable`. `pam enable sudo` ilk `auth`
+    satırından önce `auth sufficient pam_mazeconnect.so # maze-connect`
+    ekler; polkit için `/usr/lib/pam.d/polkit-1`'i `/etc`'ye kopyalar,
+    `disable` geri alır (kopyayı da siler). **Kurulumda hiçbir şey açılmaz**;
+    paket kaldırılırken `pre_remove` satırları siler.
+- **Telefonu kilitle** (`lockPhone`): Telefon kartında *Lock*. Telefonda
+  sahibinin anahtarı + Android'in cihaz yöneticisi onayı (yalnızca
+  `force-lock`); kapatınca yetki geri alınır. Dakikada 3.
+- **Kalıcı denetim günlüğü** (`AuditLog`, `audit.jsonl`, 0600, 256 KiB'da
+  döner): eşleşme, izin değişikliği, komut (id + çıkış kodu, çıktı değil),
+  killswitch, uzaktan kontrol, kilit açma/onay, telefon kilitleme, dosyalar
+  (yalnız ad). Activity → *History*. Oturum listesi (ActivityLog) eskisi gibi
+  yalnızca bellekte.
+- Daemon unit'ine `RuntimeDirectory=maze-connect` (ProtectSystem=strict
+  altında röle için). Not: `mazeconnectd` hâlâ yer tutucu; röleyi bugün GUI
+  başlatıyor.
+
+**Konum özelliği bilerek eklenmedi:** bağlantı yalnızca LAN'da, yani telefon
+erişilebilirse zaten evde; arka plan konum izni bir şey kazandırmıyor.
+İnternet üzerinden bağlantı gelince yeniden düşünülmeli.
+
+Doğrulama: **19/19 ctest** — yeni `tst_approval` (20 test: ortak vektör,
+her alanın imzaya bağlı olduğu, P-384/sondaki bayt reddi, denetim günlüğü
+izinleri/dönmesi/sahte satır, opt-in, yanlış anahtar, başka bilgisayara bağlı
+imza, kilitli değilken ret, tekrar oynatma, iki telefonda birinin diğerinin
+challenge'ını cevaplayamaması, röle reddleri, PAM'in gidişi), `test_approval_core`
+(C) ve `tst_pam` (gerçek libpam, `pam_start_confdir`). Mutasyonla kanıtlandı:
+masaüstünde 4 kritik kontrol, PAM'de 6 kontrol kaldırılınca ilgili test
+düşüyor. `tst_pam` bir kez **boşuna geçti**: `-fvisibility=hidden`
+`pam_sm_*`'yi de gizlemişti, modül hiç yüklenmiyordu (28 =
+PAM_MODULE_UNKNOWN) ve testler yalnızca "başarı değil" diye bakıyordu. Artık
+kesin dönüş kodları sabit. `pam enable/disable` `unshare -rm` ile sahte
+/etc/pam.d üzerinde denendi. Mobilde imza vektörü üç uygulamada aynı
+(`ecb44638…`), birim testleri ve app lint temiz.
+
+**Gerçek cihazda denenmedi:** BiometricPrompt + Keystore imzası (emülatör
+yok), kscreenlocker'ın logind `Unlock`'a tepkisi, polkit-kde-agent'ın
+PAM_TEXT_INFO'yu gösterip göstermediği, cihaz yöneticisi ile kilitleme.
+İlk denemede bakılacaklar: `journalctl -t sudo` / `authpriv`, Activity →
+History, ve telefonda Settings → Approvals kodunun bilgisayardakiyle aynı
+olması.
+
+Sürüm 1.5.0-1.
+
+## 1.5.1 — sudo ve polkit telefona hiç sormuyordu
+
+**Bildirilen:** Partition Manager'ın polkit penceresi ve `sudo su` parola
+istedi, telefona bildirim gelmedi. Kurulum tamdı (modül, iki PAM satırı, kayıtlı
+anahtar, röle soketi, bağlı telefon), ama röleye **hiç bağlantı gelmemişti** ve
+journal'da `pam_mazeconnect`'ten satır yoktu. İki ayrı sebep:
+
+1. **sudo**: sudo 1.9.17, `pam_rhost` seçeneğiyle `PAM_RHOST`'a makinenin
+   **kendi adını** (`msi`) yazıyor. Modül "localhost değilse uzak" diyordu →
+   her sudo SSH sanıldı, modül sessizce çekildi. `tst_pam` bunu göremezdi:
+   sudo değil kendi programı PAM'i çağırıyordu. Artık `PAM_RHOST` yerel ad /
+   loopback ise yerel; SSH tespiti ayrıca **logind**'den
+   (`sd_pid_get_session` + `sd_session_is_remote`, libsystemd) — kullanıcının
+   silebileceği ortam değişkenleri yalnızca ek önlem.
+2. **polkit**: polkit 126+ parola yardımcısını socket-activated
+   `polkit-agent-helper@.service` içinde çalıştırıyor; `ProtectHome=yes`
+   `/run/user`'ı gizliyor → soket görünmüyor. `pam enable polkit` artık
+   `/etc/systemd/system/polkit-agent-helper@.service.d/maze-connect.conf`
+   yazıyor (`ProtectHome=tmpfs` + `BindReadOnlyPaths=-/run/user`, ev
+   dizinleri gizli kalıyor) ve `daemon-reload`; `pam disable polkit` siliyor.
+   Zaten etkin olan kurulumda `pam enable polkit` yeniden çalıştırılınca
+   drop-in yazılıyor.
+
+Ayrıca: başarısız polkit denemeleri `pam_faillock`'u tetikledi ("account
+temporarily locked") — `faillock --user <kullanıcı> --reset`.
+
+Test: `tst_pam`'e `PAM_RHOST` = makine adı ve `localhost` durumları eklendi;
+eski davranış geri konunca düşüyor. **polkit drop-in'i gerçek polkit ile
+denenmedi** (root gerekir).
+
+Sürüm 1.5.1-1.
+
+## 1.5.2 — sudo telefona hâlâ sormuyordu: PAM_SILENT
+
+**Bildirilen:** polkit telefonla onaylandı, `sudo su` ise telefona hiç
+sormadı ve doğru parola da reddedildi.
+
+- **Telefona sorulmaması:** sudo `pam_authenticate`'i varsayılan olarak
+  `PAM_SILENT` ile çağırıyor (sudoers `pam_silent`). Modül "mesaj
+  gösteremem" diye bu bayrakta çekiliyordu — ve `tst_pam` bunu doğru
+  davranış diye sabitlemişti. sudo bilgi mesajlarını yine de basıyor
+  (pam_fprintd'nin "parmağınızı koyun"u gibi); modül artık PAM_SILENT'i yok
+  sayıyor. Test tersine çevrildi: PAM_SILENT ile kod gösteriliyor ve onay
+  çalışıyor.
+- **Doğru parolanın reddi Maze Connect değil:** `pam_faillock` (15 dk'da 3
+  hata → 10 dk kilit). İptal edilen polkit penceresi + parola girilmeden
+  kesilen iki sudo saydı; kilitliyken doğru parola da reddedilir. Çözüm
+  `faillock --user <kullanıcı> --reset` ya da 10 dk beklemek.
+
+Sürüm 1.5.2-1.
+
+## 1.5.3 — Ayarlar düzeni, röle ve logind kararlılığı
+
+- **Bildirilen:** Ayarlar'da onay satırındaki *Revoke* düğmesi anahtar
+  kodunun üstüne biniyordu. Sebep: düğmeler `Pill`'in üstüne sağdan sabit
+  110 px ile elle konuyordu, değer metni ise sağa yaslıydı. `Pill` artık
+  `trailing` (düğmeler için yer) ve `detail` (ikinci satır) alıyor; değer
+  düğmelerin solunda bitiyor, etiket ondan önce kısalıyor. Onay satırları:
+  ad + altında anahtar kodu, sağda durum ve düğme. sudo/polkit bölümü
+  ayrıldı: modül, root'un kaydettiği telefonlar, sudo, polkit satırları ve
+  yalnızca **eksik adımların** komutlarını gösteren kopyalanabilir kutu.
+- **/etc izleniyor:** `maze-connect-approvers` terminalde çalışınca Ayarlar
+  kendiliğinden güncelleniyor (`QFileSystemWatcher`, dizinler — araç
+  dosyaları yeniden adlandırarak değiştiriyor; 300 ms debounce).
+- **Röle bekçisi:** 30 sn'de bir soket yoksa/dinlemiyorsa yeniden açılıyor;
+  başarısızlık bir kez Activity'ye yazılıyor, Ayarlar'da *Retry*.
+- **logind:** oturum yolu bir kez çözülüp tutuluyor (her kilit açmada 2–3
+  senkron D-Bus çağrısı yerine 1); çağrı hata verirse yol yeniden çözülüyor.
+  Boş hata mesajları artık açıklamalı.
+- QML lint: dört görünümdeki `id: header` (ListView.header'ı gölgeliyordu)
+  `topBar` oldu — qmllint sıfır uyarı.
+
+Ayarlar görünümü sahte Backend ile ekransız çizilip kontrol edildi.
+
+Sürüm 1.5.3-1.

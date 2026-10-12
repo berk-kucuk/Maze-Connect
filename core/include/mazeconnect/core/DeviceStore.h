@@ -17,6 +17,10 @@ struct PairedDevice {
     QByteArray publicKey;   ///< SPKI DER public key — the pinned identity
     QDateTime pairedAt;
     Capabilities enabledCapabilities = defaultEnabledCapabilities();
+    /// The phone's biometric-bound approval key (SPKI DER), or empty. Seeing
+    /// one grants nothing: Capability::Approval is opt-in, and switched back
+    /// off whenever this changes.
+    QByteArray approvalKey;
 
     bool isValid() const;
     QString fingerprint() const;
@@ -74,6 +78,17 @@ public:
     bool update(const QByteArray &publicKey,
                 const QString &deviceName,
                 Capabilities enabledCapabilities);
+
+    /**
+     * Record the approval key a pinned device sent (empty withdraws it).
+     *
+     * A key that differs from the one on record also switches
+     * Capability::Approval off for that device: the owner said yes to the
+     * key they were shown, and this is not that key. @p changed reports
+     * whether anything was different.
+     */
+    bool setApprovalKey(const QByteArray &publicKey, const QByteArray &approvalKey,
+                        bool *changed = nullptr);
 
     bool remove(const QByteArray &publicKey);
     void clear();

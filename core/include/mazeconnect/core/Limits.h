@@ -70,5 +70,35 @@ inline constexpr int kReplayWindowSize = 512;
 inline constexpr int kMaxConnectionsPerPeer = 4;
 inline constexpr int kPairingAttemptsPerMinute = 5;
 
+// ---- approval (docs/PROTOCOL.md § approval) --------------------------------
+
+// The challenge nonce, and the bounds on what a challenge shows its owner.
+inline constexpr int kApprovalNonceSize = 32;
+inline constexpr int kMaxApprovalHostChars = 64;
+inline constexpr int kMaxApprovalUserChars = 64;
+inline constexpr int kMaxApprovalDetailChars = 120;
+
+// An ECDSA P-256 signature in DER is at most 72 bytes; 8 is the smallest
+// that can be well-formed at all.
+inline constexpr int kMinApprovalSignature = 8;
+inline constexpr int kMaxApprovalSignature = 72;
+
+// The number the owner copies from this screen to the phone. Two digits is
+// what keeps it quick to type; it is a check that the person approving is
+// looking at the request, not a secret on its own.
+inline constexpr int kApprovalCodeDigits = 2;
+
+// How long a challenge stays answerable. Long enough to find the phone and
+// touch the sensor, short enough that a prompt left on a desk is dead.
+inline constexpr int kApprovalTimeoutMs = 45000;
+
+// Unlock challenges one device may ask for in a minute, and approval keys it
+// may send. Each challenge is a fingerprint prompt on the phone.
+inline constexpr int kMaxUnlockRequestsPerMinute = 5;
+inline constexpr int kMaxApprovalKeysPerMinute = 5;
+
+// Phone locks one computer may ask for in a minute.
+inline constexpr int kMaxPhoneLocksPerMinute = 3;
+
 } // namespace limits
 } // namespace mazeconnect::core

@@ -69,6 +69,14 @@ constexpr TypeEntry kTypes[] = {
     {MessageType::ClipboardSync, "clipboardSync"},
     {MessageType::FolderPreview, "folderPreview"},
     {MessageType::FolderPreviewResult, "folderPreviewResult"},
+    {MessageType::ApprovalKey, "approvalKey"},
+    {MessageType::UnlockRequest, "unlockRequest"},
+    {MessageType::ApprovalRequest, "approvalRequest"},
+    {MessageType::ApprovalResponse, "approvalResponse"},
+    {MessageType::ApprovalResult, "approvalResult"},
+    {MessageType::ApprovalCancel, "approvalCancel"},
+    {MessageType::LockPhone, "lockPhone"},
+    {MessageType::LockPhoneResult, "lockPhoneResult"},
 };
 
 bool hasControlCharacters(const QString &s) {
@@ -224,6 +232,25 @@ QByteArray Message::binary(QLatin1StringView key, int expectedSize) const {
     const QByteArray decoded = QByteArray::fromBase64(
         value.toString().toLatin1(), QByteArray::Base64Encoding | QByteArray::AbortOnBase64DecodingErrors);
     if (decoded.size() != expectedSize) {
+        return {};
+    }
+    return decoded;
+}
+
+QByteArray Message::binary(QLatin1StringView key, int minSize, int maxSize) const {
+    const QJsonValue value = m_body.value(key);
+    if (!value.isString() || minSize < 0 || maxSize < minSize) {
+        return {};
+    }
+    const QString encoded = value.toString();
+    // Four characters for every three bytes, rounded up: anything longer
+    // cannot decode within the bound, so it is not decoded at all.
+    if (encoded.size() > ((maxSize + 2) / 3) * 4) {
+        return {};
+    }
+    const QByteArray decoded = QByteArray::fromBase64(
+        encoded.toLatin1(), QByteArray::Base64Encoding | QByteArray::AbortOnBase64DecodingErrors);
+    if (decoded.size() < minSize || decoded.size() > maxSize) {
         return {};
     }
     return decoded;
@@ -635,6 +662,79 @@ Message Message::folderPreviewResult(quint64 counter, quint32 requestId, const Q
         body.insert(QLatin1StringView("error"), error);
     }
     return Message(MessageType::FolderPreviewResult, counter, body);
+}
+
+Message Message::approvalKey(quint64 counter, const QByteArray &key) {
+    QJsonObject body;
+    if (!key.isEmpty()) {
+        body.insert(QLatin1StringView("key"), QString::fromLatin1(key.toBase64()));
+    }
+    return Message(MessageType::ApprovalKey, counter, body);
+}
+
+Message Message::unlockRequest(quint64 counter) {
+    return Message(MessageType::UnlockRequest, counter, QJsonObject());
+}
+
+Message Message::approvalRequest(quint64 counter, quint32 requestId, const QString &purpose,
+                                 const QString &host, const QString &user,
+                                 const QString &detail, const QByteArray &nonce,
+                                 qint64 issuedAt, bool codeRequired) {
+    QJsonObject body;
+    body.insert(QLatin1StringView("requestId"), static_cast<qint64>(requestId));
+    body.insert(QLatin1StringView("purpose"), purpose);
+    body.insert(QLatin1StringView("host"), host);
+    body.insert(QLatin1StringView("user"), user);
+    body.insert(QLatin1StringView("detail"), detail);
+    body.insert(QLatin1StringView("nonce"), QString::fromLatin1(nonce.toBase64()));
+    body.insert(QLatin1StringView("issuedAt"), static_cast<double>(issuedAt));
+    body.insert(QLatin1StringView("codeRequired"), codeRequired);
+    return Message(MessageType::ApprovalRequest, counter, body);
+}
+
+Message Message::approvalResponse(quint64 counter, quint32 requestId,
+                                  const QByteArray &signature, const QString &error) {
+    QJsonObject body;
+    body.insert(QLatin1StringView("requestId"), static_cast<qint64>(requestId));
+    if (error.isEmpty()) {
+        body.insert(QLatin1StringView("signature"), QString::fromLatin1(signature.toBase64()));
+    } else {
+        body.insert(QLatin1StringView("error"), error);
+    }
+    return Message(MessageType::ApprovalResponse, counter, body);
+}
+
+Message Message::approvalResult(quint64 counter, quint32 requestId, bool ok,
+                                const QString &error) {
+    QJsonObject body;
+    body.insert(QLatin1StringView("requestId"), static_cast<qint64>(requestId));
+    body.insert(QLatin1StringView("ok"), ok);
+    if (!error.isEmpty()) {
+        body.insert(QLatin1StringView("error"), error);
+    }
+    return Message(MessageType::ApprovalResult, counter, body);
+}
+
+Message Message::approvalCancel(quint64 counter, quint32 requestId, const QString &reason) {
+    QJsonObject body;
+    body.insert(QLatin1StringView("requestId"), static_cast<qint64>(requestId));
+    if (!reason.isEmpty()) {
+        body.insert(QLatin1StringView("reason"), reason);
+    }
+    return Message(MessageType::ApprovalCancel, counter, body);
+}
+
+Message Message::lockPhone(quint64 counter) {
+    return Message(MessageType::LockPhone, counter, QJsonObject());
+}
+
+Message Message::lockPhoneResult(quint64 counter, bool locked, const QString &error) {
+    QJsonObject body;
+    body.insert(QLatin1StringView("locked"), locked);
+    if (!error.isEmpty()) {
+        body.insert(QLatin1StringView("error"), error);
+    }
+    return Message(MessageType::LockPhoneResult, counter, body);
 }
 
 // ---- Data chunk framing -------------------------------------------------

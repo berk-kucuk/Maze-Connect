@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.25)
 project(MazeConnect
-    VERSION 1.4.4
+    VERSION 1.5.3
     DESCRIPTION "Maze Linux device-link app"
-    LANGUAGES CXX
+    LANGUAGES C CXX
 )
 
 set(CMAKE_CXX_STANDARD 20)
@@ -19,12 +19,17 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 option(BUILD_DAEMON "Build the mazeconnectd background daemon" ON)
 option(BUILD_GUI "Build the QML pairing/settings UI" ON)
 option(BUILD_TESTS "Build the mazeconnect-core test suite" ON)
+option(BUILD_PAM "Build pam_mazeconnect and maze-connect-approvers" ON)
 
 if(BUILD_TESTS)
     enable_testing()
 endif()
 
 add_subdirectory(core)
+
+if(BUILD_PAM)
+    add_subdirectory(pam)
+endif()
 
 if(BUILD_DAEMON)
     add_subdirectory(daemon)

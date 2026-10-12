@@ -80,6 +80,10 @@ post_install() {
       systemctl --user enable --now mazeconnectd
   or just run `maze-connect` — the GUI hosts the same service in-process.
   Run one or the other, not both: they contend for the same port.
+
+  Optional - approve sudo/polkit with your phone (nothing is enabled yet):
+      sudo maze-connect-approvers enroll
+      sudo maze-connect-approvers pam enable sudo
 EOF
 }
 
@@ -93,6 +97,17 @@ post_upgrade() {
     if pgrep -x maze-connect >/dev/null 2>&1 || pgrep -x mazeconnectd >/dev/null 2>&1; then
         echo ">> Maze Connect is running the previous version. Quit it from the tray"
         echo "   and open it again (or: systemctl --user restart mazeconnectd)."
+    fi
+}
+
+pre_remove() {
+    # The PAM lines go before the module does. A `sufficient` line naming a
+    # module that is no longer there is skipped by libpam, but it logs an
+    # error on every sudo, and nobody should be left with a line in
+    # /etc/pam.d pointing at nothing. Enrolled keys in /etc/maze-connect are
+    # left alone — they are the owner's, and harmless without the module.
+    if command -v maze-connect-approvers >/dev/null 2>&1; then
+        maze-connect-approvers pam disable all >/dev/null 2>&1 || true
     fi
 }
 

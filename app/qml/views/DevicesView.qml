@@ -22,7 +22,7 @@ Item {
     // needs a rescan exactly as much as an empty one does, and this view has
     // nothing else to press.
     Item {
-        id: header
+        id: topBar
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
@@ -47,7 +47,7 @@ Item {
         id: list
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.top: header.bottom
+        anchors.top: topBar.bottom
         anchors.bottom: parent.bottom
         anchors.topMargin: 12
         clip: true

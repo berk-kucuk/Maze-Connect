@@ -9,6 +9,7 @@ add_library(mazeconnect-core
     src/DeviceManager.cpp
     src/crypto/Identity.cpp
     src/crypto/Sas.cpp
+    src/crypto/Approval.cpp
     src/protocol/Framing.cpp
     src/protocol/ReplayWindow.cpp
     src/protocol/Capabilities.cpp
@@ -16,6 +17,8 @@ add_library(mazeconnect-core
     src/filetransfer/PathSanitizer.cpp
     src/filetransfer/FileTransfer.cpp
     src/plugins/AiBridge.cpp
+    src/plugins/ApprovalRelay.cpp
+    src/plugins/SessionControl.cpp
     src/plugins/CommandRunner.cpp
     src/plugins/GuardBridge.cpp
     src/plugins/MediaBridge.cpp
@@ -25,6 +28,7 @@ add_library(mazeconnect-core
     src/plugins/Thumbnailer.cpp
     src/plugins/StatusProvider.cpp
     src/storage/DeviceStore.cpp
+    src/storage/AuditLog.cpp
     src/discovery/Beacon.cpp
     src/transport/Connection.cpp
     src/transport/Server.cpp
@@ -34,6 +38,10 @@ add_library(mazeconnect-core
     include/mazeconnect/core/Limits.h
     include/mazeconnect/core/Identity.h
     include/mazeconnect/core/Sas.h
+    include/mazeconnect/core/Approval.h
+    include/mazeconnect/core/ApprovalRelay.h
+    include/mazeconnect/core/AuditLog.h
+    include/mazeconnect/core/SessionControl.h
     include/mazeconnect/core/Framing.h
     include/mazeconnect/core/ReplayWindow.h
     include/mazeconnect/core/Capabilities.h

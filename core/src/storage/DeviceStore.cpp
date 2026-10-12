@@ -1,5 +1,6 @@
 #include "mazeconnect/core/DeviceStore.h"
 
+#include "mazeconnect/core/Approval.h"
 #include "mazeconnect/core/Identity.h"
 #include "mazeconnect/core/Limits.h"
 
@@ -80,6 +81,17 @@ bool DeviceStore::load() {
         }
         device.enabledCapabilities = capabilitiesFromNames(capNames);
 
+        // An approval key that does not parse is dropped, and so is the
+        // permission that went with it: approval without a usable key is a
+        // switch that is on and can never do anything.
+        device.approvalKey = QByteArray::fromBase64(
+            obj.value(QLatin1StringView("approvalKey")).toString().toLatin1(),
+            QByteArray::Base64Encoding | QByteArray::AbortOnBase64DecodingErrors);
+        if (!approval::isAcceptableKey(device.approvalKey)) {
+            device.approvalKey.clear();
+            device.enabledCapabilities.setFlag(Capability::Approval, false);
+        }
+
         // Capabilities this build has that the record has never heard of are
         // granted, like everything else is at pairing. The enabled set used
         // to be frozen at pairing time, so a feature added later — media
@@ -135,6 +147,10 @@ bool DeviceStore::save() const {
                    QJsonArray::fromStringList(capabilitiesToNames(device.enabledCapabilities)));
         obj.insert(QLatin1StringView("knownCapabilities"),
                    QJsonArray::fromStringList(capabilitiesToNames(supportedCapabilities())));
+        if (!device.approvalKey.isEmpty()) {
+            obj.insert(QLatin1StringView("approvalKey"),
+                       QString::fromLatin1(device.approvalKey.toBase64()));
+        }
         array.append(obj);
     }
 
@@ -215,6 +231,31 @@ bool DeviceStore::update(const QByteArray &publicKey,
             device.enabledCapabilities = enabledCapabilities;
             return save();
         }
+    }
+    return false;
+}
+
+bool DeviceStore::setApprovalKey(const QByteArray &publicKey, const QByteArray &approvalKey,
+                                 bool *changed) {
+    if (changed) {
+        *changed = false;
+    }
+    if (!approvalKey.isEmpty() && !approval::isAcceptableKey(approvalKey)) {
+        return false;
+    }
+    for (PairedDevice &device : m_devices) {
+        if (!constantTimeEquals(device.publicKey, publicKey)) {
+            continue;
+        }
+        if (constantTimeEquals(device.approvalKey, approvalKey)) {
+            return true;
+        }
+        device.approvalKey = approvalKey;
+        device.enabledCapabilities.setFlag(Capability::Approval, false);
+        if (changed) {
+            *changed = true;
+        }
+        return save();
     }
     return false;
 }
