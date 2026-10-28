@@ -52,9 +52,22 @@ The Android counterpart lives at
 - Media control of every MPRIS player and the system volume, with
   lock-screen controls.
 - Commands from an allow-list defined here — never a shell.
-- maze-guard killswitches (camera, microphone, Wi-Fi, Bluetooth, USB).
+- Hardware killswitches (camera, microphone, Wi-Fi, Bluetooth, USB) through
+  maze-tools' maze-switchd.
 - Chat with Maze AI through this computer's Ollama.
 - Files both ways, from any app's Share menu.
+
+**KDE Connect compatibility** (Settings, off until switched on)
+
+- For phones without the Maze Connect app — an iPhone, or anyone who would
+  rather not sideload an APK: the switch runs the system's own `kdeconnectd`
+  (optional dependency `kdeconnect`), and its devices appear under Devices
+  with pairing, ping, ring, files and clipboard. Off writes per-user overrides
+  so neither the session nor D-Bus activation starts it again.
+- KDE Connect keeps its own pairing and permissions; Maze Connect's checks
+  do not apply to it. Its firewall ports (1714–1764) are opened by the
+  package at install, next to Maze Connect's own; the app never asks
+  firewalld anything, since even reading it takes an administrator password.
 
 Every feature is a **capability**, granted by pairing and revocable per
 device; the phone's owner has their own switches for what the computer may

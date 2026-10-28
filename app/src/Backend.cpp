@@ -395,6 +395,11 @@ bool Backend::start() {
             [this] { m_adminRefresh.start(); });
     watchAdminPaths();
     refreshAdminApproval();
+
+    // KDE Connect compatibility: only watched here — nothing is started or
+    // stopped until the switch in Settings is pressed.
+    connect(&m_kdeConnect, &KdeConnectBridge::changed, this, &Backend::kdeConnectChanged);
+    m_kdeConnect.ensureStarted();
     return true;
 }
 
@@ -1393,4 +1398,112 @@ QVariantList Backend::auditEntries() const {
 void Backend::clearAudit() {
     m_manager.clearAuditLog();
     emit auditChanged();
+}
+
+// ---- KDE Connect compatibility ----------------------------------------------
+
+QVariantMap Backend::kdeConnect() const {
+    return {
+        {QStringLiteral("installed"), m_kdeConnect.isInstalled()},
+        {QStringLiteral("enabled"), m_kdeConnect.isEnabled()},
+        {QStringLiteral("running"), m_kdeConnect.isRunning()},
+    };
+}
+
+QVariantList Backend::kdeConnectDevices() const {
+    QVariantList list;
+    for (const KdeConnectDevice &d : m_kdeConnect.devices()) {
+        list.append(QVariantMap{
+            {QStringLiteral("deviceId"), d.id},
+            {QStringLiteral("name"), d.name},
+            {QStringLiteral("type"), d.type},
+            {QStringLiteral("reachable"), d.reachable},
+            {QStringLiteral("paired"), d.paired},
+            {QStringLiteral("pairRequested"), d.pairRequested},
+            {QStringLiteral("pairRequestedByPeer"), d.pairRequestedByPeer},
+            {QStringLiteral("verificationKey"), d.verificationKey},
+            {QStringLiteral("battery"), d.battery},
+            {QStringLiteral("charging"), d.charging},
+            {QStringLiteral("canPing"), d.canPing},
+            {QStringLiteral("canRing"), d.canRing},
+            {QStringLiteral("canShare"), d.canShare},
+            {QStringLiteral("canClipboard"), d.canClipboard},
+        });
+    }
+    return list;
+}
+
+void Backend::reportKdeConnect(bool sent, const QString &done, const QString &error) {
+    setStatus(sent ? done : tr("KDE Connect: %1").arg(error));
+}
+
+void Backend::setKdeConnectEnabled(bool enabled) {
+    QString error;
+    const bool ok = m_kdeConnect.setEnabled(enabled, error);
+    reportKdeConnect(ok,
+                     enabled ? tr("KDE Connect is on. Pair from the KDE Connect app on the "
+                                  "phone, or from Devices here.")
+                             : tr("KDE Connect is off and will stay off after a restart."),
+                     error);
+    emit kdeConnectChanged();
+}
+
+void Backend::refreshKdeConnect() {
+    m_kdeConnect.refresh();
+}
+
+void Backend::kdeConnectPair(const QString &deviceId) {
+    QString error;
+    const bool ok = m_kdeConnect.requestPairing(deviceId, error);
+    reportKdeConnect(ok, tr("Asked to pair — compare the key on both screens."), error);
+}
+
+void Backend::kdeConnectAcceptPairing(const QString &deviceId) {
+    QString error;
+    const bool ok = m_kdeConnect.acceptPairing(deviceId, error);
+    reportKdeConnect(ok, tr("Pairing accepted."), error);
+}
+
+void Backend::kdeConnectRejectPairing(const QString &deviceId) {
+    QString error;
+    const bool ok = m_kdeConnect.rejectPairing(deviceId, error);
+    reportKdeConnect(ok, tr("Pairing declined."), error);
+}
+
+void Backend::kdeConnectUnpair(const QString &deviceId) {
+    QString error;
+    const bool ok = m_kdeConnect.unpair(deviceId, error);
+    reportKdeConnect(ok, tr("Unpaired in KDE Connect."), error);
+}
+
+void Backend::kdeConnectPing(const QString &deviceId) {
+    QString error;
+    const bool ok = m_kdeConnect.ping(deviceId, error);
+    reportKdeConnect(ok, tr("Ping sent."), error);
+}
+
+void Backend::kdeConnectRing(const QString &deviceId) {
+    QString error;
+    const bool ok = m_kdeConnect.ring(deviceId, error);
+    reportKdeConnect(ok, tr("Ringing…"), error);
+}
+
+void Backend::kdeConnectSendFile(const QString &deviceId, const QString &fileUrl) {
+    const QUrl url(fileUrl);
+    const QString path = url.isLocalFile() ? url.toLocalFile() : fileUrl;
+    QString error;
+    const bool ok = m_kdeConnect.shareFile(deviceId, path, error);
+    reportKdeConnect(ok, tr("Sending through KDE Connect."), error);
+}
+
+void Backend::kdeConnectSendClipboard(const QString &deviceId) {
+    QString error;
+    const bool ok = m_kdeConnect.sendClipboard(deviceId, error);
+    reportKdeConnect(ok, tr("Clipboard sent."), error);
+}
+
+void Backend::openKdeConnectSettings() {
+    if (!QProcess::startDetached(QStringLiteral("kdeconnect-app"), {})) {
+        setStatus(tr("Could not open KDE Connect."));
+    }
 }

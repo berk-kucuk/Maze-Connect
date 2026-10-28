@@ -215,6 +215,13 @@ void Connection::onReadyRead() {
     m_parser.append(m_socket->readAll());
 
     for (;;) {
+        // A handler for the previous frame may have ended the link (an
+        // unpaired peer sending a paired-only message, a data frame for a
+        // transfer nobody accepted). Whatever else arrived in the same read
+        // belongs to a link that no longer exists and is not delivered.
+        if (m_state == State::Disconnected) {
+            return;
+        }
         FrameType type{};
         QByteArray payload;
         const FrameParser::Status status = m_parser.next(type, payload);

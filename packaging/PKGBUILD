@@ -1,8 +1,8 @@
 # Maintainer: Berk Küçük <dev.berkkucukk@gmail.com>
 
 pkgname=maze-connect
-pkgver=1.5.3
-pkgrel=1
+pkgver=1.6.0
+pkgrel=2
 pkgdesc="Maze Linux device-link app — pair your phone over the LAN with verified, pinned mutual TLS"
 arch=('x86_64' 'aarch64')
 url="https://github.com/berk-kucuk/Maze-Connect"
@@ -16,7 +16,8 @@ depends=(
     'systemd-libs'
 )
 optdepends=('maze-tools: readings of this computer for the phone dashboard; without it the phone says so'
-            'wireplumber: lets the phone set the computer volume (wpctl); media players work without it')
+            'wireplumber: lets the phone set the computer volume (wpctl); media players work without it'
+            'kdeconnect: KDE Connect compatibility (Settings) — use the KDE Connect app on Android or iPhone instead of the Maze Connect app')
 makedepends=('cmake' 'ninja')
 # check() runs the media bridge against a private bus of its own.
 checkdepends=('dbus')

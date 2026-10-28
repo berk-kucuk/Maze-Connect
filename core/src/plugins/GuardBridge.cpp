@@ -17,7 +17,7 @@ struct DeviceEntry {
 };
 
 /**
- * The whole device vocabulary, matching maze-guardd's own DEVICES tuple.
+ * The whole device vocabulary, matching maze-switchd's own DEVICES tuple.
  *
  * A name arriving from a peer is looked up here and converted to an enum. It
  * is never passed onward as text, so the command line this class builds cannot
@@ -87,12 +87,21 @@ QString GuardBridge::socketPath() {
     if (!override.isEmpty()) {
         return override;
     }
-    // maze-guardd (maze-tools) — the privileged-action broker that owns panic and
+    // maze-switchd (maze-tools) — the privileged-action broker that owns panic and
     // the hardware killswitches. NOT /run/maze/maze.sock: that belongs to a
     // DIFFERENT daemon, maze-guard's own helper, which does MAC randomisation and
     // does not speak this STATUS/KILL protocol. Pointing here at maze.sock makes
     // the connection succeed and then hang forever with no reply.
-    return QStringLiteral("/run/maze/guard.sock");
+    //
+    // maze-tools < 2.2.0 called the broker maze-switchd and its socket
+    // guard.sock — same protocol, so fall back to it while machines still run
+    // the old package.
+    const QString current = QStringLiteral("/run/maze/switch.sock");
+    const QString legacy = QStringLiteral("/run/maze/guard.sock");
+    if (!QFileInfo::exists(current) && QFileInfo::exists(legacy)) {
+        return legacy;
+    }
+    return current;
 }
 
 bool GuardBridge::isAvailable() const {
@@ -129,7 +138,7 @@ QMap<GuardDevice, GuardState> GuardBridge::parseStatus(const QString &reply) con
 
 void GuardBridge::requestStatus() {
     if (!isAvailable()) {
-        emit statusFailed(QStringLiteral("maze-guardd is not available on this machine"));
+        emit statusFailed(QStringLiteral("maze-switchd is not available on this machine"));
         return;
     }
     // A literal verb with no argument: there is nothing here a caller could
@@ -148,7 +157,7 @@ void GuardBridge::setDeviceEnabled(GuardDevice device, bool enabled) {
     }
     if (!isAvailable()) {
         emit killApplied(device, enabled, GuardState::Unknown,
-                         QStringLiteral("maze-guardd is not available on this machine"));
+                         QStringLiteral("maze-switchd is not available on this machine"));
         return;
     }
 
@@ -156,7 +165,7 @@ void GuardBridge::setDeviceEnabled(GuardDevice device, bool enabled) {
     // expressed here: PANIC, RESTORE, a second line, an extra argument, or a
     // device the enum does not name.
     //
-    // "on" enables the device and "off" blocks it — maze-guardd's own
+    // "on" enables the device and "off" blocks it — maze-switchd's own
     // vocabulary, and the reason the parameter is named after the device.
     Pending pending;
     pending.command = QStringLiteral("KILL %1 %2")
@@ -184,7 +193,7 @@ void GuardBridge::startNext() {
     m_socket = new QLocalSocket(this);
 
     connect(m_socket, &QLocalSocket::connected, this, [this] {
-        // One line, terminated. maze-guardd reads a single line per
+        // One line, terminated. maze-switchd reads a single line per
         // connection and ignores anything after the first.
         m_socket->write(m_current.command.toLatin1() + '\n');
     });
@@ -192,7 +201,7 @@ void GuardBridge::startNext() {
     connect(m_socket, &QLocalSocket::readyRead, this, [this] {
         m_buffer.append(m_socket->readAll());
         if (m_buffer.size() > kMaxReplyBytes) {
-            failCurrent(QStringLiteral("maze-guardd answered with more than we can read"));
+            failCurrent(QStringLiteral("maze-switchd answered with more than we can read"));
             return;
         }
         const int newline = m_buffer.indexOf('\n');
@@ -206,15 +215,15 @@ void GuardBridge::startNext() {
         // A close after a complete reply is normal; only an error before one
         // is a failure.
         if (m_socket) {
-            failCurrent(QStringLiteral("maze-guardd is not running"));
+            failCurrent(QStringLiteral("maze-switchd is not running"));
         }
     });
 
     m_timeout = new QTimer(this);
     m_timeout->setSingleShot(true);
     connect(m_timeout, &QTimer::timeout, this, [this] {
-        qCWarning(lcGuard) << "maze-guardd did not answer in time";
-        failCurrent(QStringLiteral("maze-guardd did not answer"));
+        qCWarning(lcGuard) << "maze-switchd did not answer in time";
+        failCurrent(QStringLiteral("maze-switchd did not answer"));
     });
     m_timeout->start(kTimeoutMs);
 
@@ -227,10 +236,10 @@ void GuardBridge::handleReply(const QString &reply) {
     if (reply.startsWith(QLatin1StringView("ERR"))) {
         error = reply.mid(4).trimmed();
         if (error.isEmpty()) {
-            error = QStringLiteral("maze-guardd refused the request");
+            error = QStringLiteral("maze-switchd refused the request");
         }
     } else if (!reply.startsWith(QLatin1StringView("OK"))) {
-        error = QStringLiteral("unexpected answer from maze-guardd");
+        error = QStringLiteral("unexpected answer from maze-switchd");
     }
 
     finishCurrent();

@@ -10,7 +10,7 @@ class QTimer;
 
 namespace mazeconnect::core {
 
-/// The killswitches maze-guardd knows about. A fixed enum, never a string.
+/// The killswitches maze-switchd knows about. A fixed enum, never a string.
 enum class GuardDevice {
     Camera,
     Microphone,
@@ -19,7 +19,7 @@ enum class GuardDevice {
     Usb,
 };
 
-/// Three real states plus "we could not tell". `Unavailable` is maze-guardd's
+/// Three real states plus "we could not tell". `Unavailable` is maze-switchd's
 /// own `none` — the machine has no such device — and is not the same as off.
 enum class GuardState {
     On,
@@ -34,10 +34,10 @@ bool guardDeviceFromName(const QString &name, GuardDevice &out);
 QString guardStateName(GuardState state);
 
 /**
- * A deliberately narrow bridge to maze-guardd.
+ * A deliberately narrow bridge to maze-switchd.
  *
  * **This class is the most security-sensitive thing in the project**, because
- * of what maze-guardd says about itself:
+ * of what maze-switchd says about itself:
  *
  *   > Callers are authorised by SO_PEERCRED: the peer must be a real user with
  *   > an ACTIVE local session (mirrors polkit allow_active) — not root, not
@@ -63,7 +63,7 @@ QString guardStateName(GuardState state);
  * 5. Every privileged action is logged and announced on the desktop, so a
  *    remote toggle is never silent.
  *
- * Mirroring maze-guardd's own discipline is the point: a broker that refuses
+ * Mirroring maze-switchd's own discipline is the point: a broker that refuses
  * to interpret caller strings should not be fronted by a proxy that does.
  */
 class GuardBridge : public QObject {
@@ -73,12 +73,13 @@ public:
     explicit GuardBridge(QObject *parent = nullptr);
     ~GuardBridge() override;
 
-    /// `/run/maze/guard.sock`. $MAZECONNECT_GUARD_SOCKET overrides it for
+    /// `/run/maze/switch.sock` (`guard.sock` on maze-tools < 2.2.0, used when
+    /// only that one exists). $MAZECONNECT_GUARD_SOCKET overrides it for
     /// tests; that is not a privilege boundary, since anyone able to set this
     /// process's environment can already run code as this user.
     static QString socketPath();
 
-    /// False when maze-tools is not installed or maze-guardd is not running.
+    /// False when maze-tools is not installed or maze-switchd is not running.
     /// The UI then says so rather than showing switches that do nothing.
     bool isAvailable() const;
 
@@ -100,16 +101,16 @@ public:
      * user watched the opposite of what they pressed.
      *
      * The parameter is named after the device rather than the switch because
-     * that is the vocabulary maze-guardd and `rfkill` already use, and having
+     * that is the vocabulary maze-switchd and `rfkill` already use, and having
      * two vocabularies for one boolean is what caused the inversion.
      */
     void setDeviceEnabled(GuardDevice device, bool enabled);
 
-    /// Longest we wait on the broker before giving up. maze-guardd shells out
+    /// Longest we wait on the broker before giving up. maze-switchd shells out
     /// to rfkill/systemctl, so this is not instant.
     static constexpr int kTimeoutMs = 15000;
 
-    /// Replies are one short line; anything larger is not maze-guardd.
+    /// Replies are one short line; anything larger is not maze-switchd.
     static constexpr int kMaxReplyBytes = 4096;
 
 signals:
@@ -127,7 +128,7 @@ private:
     /**
      * One exchange with the broker: a line out, a line back.
      *
-     * Asynchronous on purpose. maze-guardd shells out to rfkill, systemctl and
+     * Asynchronous on purpose. maze-switchd shells out to rfkill, systemctl and
      * modprobe, and gives *itself* a 60-second budget for those; a blocking
      * read here would freeze the desktop for as long as the slowest of them
      * takes. Requests are queued and served one at a time, which also matches

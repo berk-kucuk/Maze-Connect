@@ -46,3 +46,15 @@ else()
     add_test(NAME tst_mediabridge COMMAND tst_mediabridge)
 endif()
 set_tests_properties(tst_mediabridge PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# KDE Connect compatibility drives the real kdeconnectd over D-Bus; the test
+# stands up a fake one on a private bus, the same way as the media bridge.
+add_executable(tst_kdeconnectbridge tst_kdeconnectbridge.cpp)
+target_link_libraries(tst_kdeconnectbridge PRIVATE mazeconnect-core Qt6::Test Qt6::DBus)
+if(DBUS_RUN_SESSION)
+    add_test(NAME tst_kdeconnectbridge
+             COMMAND ${DBUS_RUN_SESSION} -- $<TARGET_FILE:tst_kdeconnectbridge>)
+else()
+    add_test(NAME tst_kdeconnectbridge COMMAND tst_kdeconnectbridge)
+endif()
+set_tests_properties(tst_kdeconnectbridge PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

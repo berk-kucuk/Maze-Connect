@@ -16,7 +16,7 @@ import MazeConnect.App
  * machine — not to anything that can be driven from a phone.
  *
  * The state shown is what the broker last reported, never what was asked for.
- * A request maze-guardd accepted is not proof the hardware complied, so a
+ * A request maze-switchd accepted is not proof the hardware complied, so a
  * switch here follows reality rather than intent.
  */
 Item {
@@ -103,7 +103,7 @@ Item {
             wrapMode: Text.WordWrap
             text: Backend.guardError !== ""
                   ? Backend.guardError
-                  : qsTr("Asking maze-guardd for the state of each switch.")
+                  : qsTr("Asking maze-switchd for the state of each switch.")
             color: Theme.dim
             font.family: Theme.fontSans
             font.pixelSize: 13
@@ -223,7 +223,7 @@ Item {
             wrapMode: Text.WordWrap
             // Says plainly what this page will not do, so nobody goes looking
             // for the button.
-            text: qsTr("Panic and restore are not available here or from a paired phone — they are destructive, and belong at the terminal in front of this machine. Use `maze-guard` for those.")
+            text: qsTr("Panic and restore are not available here or from a paired phone — they are destructive, and belong at the terminal in front of this machine. Use the Maze Panic button (Ctrl+Alt+P) or `maze-panic` for those.")
             color: Theme.faint
             font.family: Theme.fontSans
             font.pixelSize: 11

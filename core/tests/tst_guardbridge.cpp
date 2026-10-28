@@ -11,7 +11,7 @@
 using namespace mazeconnect::core;
 
 /**
- * GuardBridge against a stand-in maze-guardd.
+ * GuardBridge against a stand-in maze-switchd.
  *
  * This is the privileged path, and the test that matters most is
  * `neverProducesPanicOrRestore`. The claim in GuardBridge's header — that
@@ -56,7 +56,7 @@ private:
 
 void TestGuardBridge::init() {
     QVERIFY(m_dir.isValid());
-    m_socketPath = QDir(m_dir.path()).filePath(QStringLiteral("guard.sock"));
+    m_socketPath = QDir(m_dir.path()).filePath(QStringLiteral("switch.sock"));
     m_seen.clear();
     m_statusReply = "OK camera=on microphone=off bluetooth=none wifi=on usb=on\n";
     m_killReply = "OK camera off\n";
@@ -90,7 +90,7 @@ void TestGuardBridge::startBroker() {
 }
 
 void TestGuardBridge::reportsAnAbsentBroker() {
-    // maze-tools not installed, or maze-guardd not running. Saying so beats
+    // maze-tools not installed, or maze-switchd not running. Saying so beats
     // showing switches that quietly do nothing.
     GuardBridge bridge;
     QVERIFY(!bridge.isAvailable());
@@ -120,7 +120,7 @@ void TestGuardBridge::parsesStatus() {
 
 void TestGuardBridge::unavailableIsNotOff() {
     // A machine with no Bluetooth is not a machine whose Bluetooth is
-    // blocked. Folding maze-guardd's "none" into "off" would report a
+    // blocked. Folding maze-switchd's "none" into "off" would report a
     // protection that does not exist.
     startBroker();
     GuardBridge bridge;
@@ -137,7 +137,7 @@ void TestGuardBridge::unavailableIsNotOff() {
 void TestGuardBridge::blockingSendsOffAndAllowingSendsOn() {
     // The direction, pinned against the wire.
     //
-    // maze-guardd's `on`/`off` name the **device**, not the switch: `KILL
+    // maze-switchd's `on`/`off` name the **device**, not the switch: `KILL
     // wifi off` runs `rfkill block`. Reading them as "protection on/off"
     // inverts every button, and it shipped that way — pressing Block sent
     // `KILL wifi on` and unblocked wifi, while the Activity log recorded
@@ -242,7 +242,7 @@ void TestGuardBridge::aDeviceNameCannotSmuggleASecondVerb() {
 }
 
 void TestGuardBridge::surfacesABrokerRefusal() {
-    // maze-guardd says no — most often because the caller has no active local
+    // maze-switchd says no — most often because the caller has no active local
     // session. That is its answer, and it should reach the user rather than
     // being reported as success.
     startBroker();

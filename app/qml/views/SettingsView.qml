@@ -8,6 +8,9 @@ Flickable {
     clip: true
     boundsBehavior: Flickable.StopAtBounds
 
+    // KDE Connect may have been installed in a terminal meanwhile.
+    onVisibleChanged: if (visible) Backend.refreshKdeConnect()
+
     Column {
         id: column
         width: root.width
@@ -72,6 +75,116 @@ Flickable {
                 glyph: Backend.autostartEnabled ? "\u25cf" : "\u25cb"
                 primary: Backend.autostartEnabled
                 onClicked: Backend.autostartEnabled = !Backend.autostartEnabled
+            }
+        }
+
+        // ---- KDE Connect compatibility ----------------------------------
+        // The system's own kdeconnectd, switched from here. Not everyone wants
+        // to sideload an APK, and an iPhone cannot run the Maze Connect app at
+        // all — the KDE Connect app is in both stores.
+        SectionLabel { text: qsTr("KDE Connect compatibility") }
+
+        Row {
+            id: kdeRow
+            width: parent.width
+            spacing: 12
+
+            readonly property var st: Backend.kdeConnect
+
+            Text {
+                width: parent.width - kdeToggle.width - 12
+                wrapMode: Text.WordWrap
+                anchors.verticalCenter: parent.verticalCenter
+                text: !kdeRow.st.installed
+                      ? qsTr("Lets the KDE Connect app — Android, iPhone, or another computer — work with this computer, without the Maze Connect app. KDE Connect is not installed yet; the command is below.")
+                      : kdeRow.st.enabled
+                        ? qsTr("Devices with the KDE Connect app can pair with this computer too; they appear under Devices. KDE Connect has its own pairing and its own permissions — Maze Connect's six-digit check, command allow-list and approvals do not apply to it. Set what it may do in KDE Connect's settings.")
+                        : qsTr("Lets the KDE Connect app — Android, iPhone, or another computer — work with this computer, without the Maze Connect app. Off: KDE Connect is not running and does not start with your session.")
+                color: Theme.dim
+                font.family: Theme.fontSans
+                font.pixelSize: 12
+                lineHeight: 1.45
+            }
+
+            MazeButton {
+                id: kdeToggle
+                anchors.verticalCenter: parent.verticalCenter
+                enabled: kdeRow.st.installed === true
+                text: kdeRow.st.enabled ? qsTr("On") : qsTr("Off")
+                glyph: kdeRow.st.enabled ? "●" : "○"
+                primary: kdeRow.st.enabled === true
+                onClicked: Backend.setKdeConnectEnabled(!kdeRow.st.enabled)
+            }
+        }
+
+        Column {
+            id: kdeState
+            width: parent.width
+            spacing: 6
+            visible: kdeRow.st.installed === true && kdeRow.st.enabled === true
+
+            Pill {
+                label: qsTr("KDE Connect")
+                value: kdeRow.st.running ? qsTr("Running") : qsTr("Starting…")
+                showDot: true
+                state_: kdeRow.st.running ? 1 : 0
+                trailing: MazeButton {
+                    text: qsTr("Settings")
+                    onClicked: Backend.openKdeConnectSettings()
+                }
+            }
+        }
+
+        // Installing is root's part: the command to paste. The firewall needs
+        // nothing here — the package opened KDE Connect's ports at install.
+        Rectangle {
+            id: kdeSteps
+            readonly property var st: Backend.kdeConnect
+            readonly property string commands: st.installed ? "" : "sudo pacman -S kdeconnect"
+            visible: commands !== ""
+            width: parent.width
+            height: kdeStepsColumn.implicitHeight + 24
+            radius: Theme.radiusPill
+            color: "transparent"
+            border.width: 1
+            border.color: Theme.hairline
+
+            Column {
+                id: kdeStepsColumn
+                anchors.left: parent.left
+                anchors.right: kdeCopy.left
+                anchors.leftMargin: 14
+                anchors.rightMargin: 12
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 6
+
+                Text {
+                    width: parent.width
+                    wrapMode: Text.WordWrap
+                    text: qsTr("Install it, in a terminal:")
+                    color: Theme.faint
+                    font.family: Theme.fontSans
+                    font.pixelSize: 11
+                }
+                Text {
+                    width: parent.width
+                    text: kdeSteps.commands
+                    textFormat: Text.PlainText
+                    color: Theme.text
+                    font.family: Theme.fontMono
+                    font.pixelSize: 11
+                    lineHeight: 1.5
+                    wrapMode: Text.WrapAnywhere
+                }
+            }
+
+            MazeButton {
+                id: kdeCopy
+                anchors.right: parent.right
+                anchors.rightMargin: 10
+                anchors.verticalCenter: parent.verticalCenter
+                text: qsTr("Copy")
+                onClicked: Backend.copyText(kdeSteps.commands)
             }
         }
 

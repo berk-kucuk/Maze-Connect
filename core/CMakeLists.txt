@@ -21,6 +21,7 @@ add_library(mazeconnect-core
     src/plugins/SessionControl.cpp
     src/plugins/CommandRunner.cpp
     src/plugins/GuardBridge.cpp
+    src/plugins/KdeConnectBridge.cpp
     src/plugins/MediaBridge.cpp
     src/plugins/PhoneStatus.cpp
     src/plugins/RemoteInput.cpp
@@ -51,6 +52,7 @@ add_library(mazeconnect-core
     include/mazeconnect/core/AiBridge.h
     include/mazeconnect/core/CommandRunner.h
     include/mazeconnect/core/GuardBridge.h
+    include/mazeconnect/core/KdeConnectBridge.h
     include/mazeconnect/core/MediaBridge.h
     include/mazeconnect/core/PhoneStatus.h
     include/mazeconnect/core/RemoteInput.h

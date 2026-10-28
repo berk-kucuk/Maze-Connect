@@ -13,6 +13,7 @@
 #include "DeviceListModel.h"
 #include "TransferModel.h"
 #include "mazeconnect/core/DeviceManager.h"
+#include "mazeconnect/core/KdeConnectBridge.h"
 
 /**
  * The QML-facing surface of the application.
@@ -139,6 +140,20 @@ class Backend : public QObject {
      */
     Q_PROPERTY(QVariantMap adminApproval READ adminApproval NOTIFY adminApprovalChanged)
 
+    /**
+     * KDE Connect compatibility, for people who would rather not install the
+     * Maze Connect app — or have an iPhone. installed, enabled, running
+     * (bool), read from the system rather than remembered: see
+     * KdeConnectBridge.
+     */
+    Q_PROPERTY(QVariantMap kdeConnect READ kdeConnect NOTIFY kdeConnectChanged)
+
+    /// KDE Connect's devices while it runs: maps with deviceId, name, type,
+    /// reachable, paired, pairRequested, pairRequestedByPeer,
+    /// verificationKey, battery (-1 unknown), charging, and canPing / canRing
+    /// / canShare / canClipboard for the plugins KDE Connect has loaded.
+    Q_PROPERTY(QVariantList kdeConnectDevices READ kdeConnectDevices NOTIFY kdeConnectChanged)
+
     // --- Startup ---------------------------------------------------------
     Q_PROPERTY(bool autostartEnabled READ autostartEnabled WRITE setAutostartEnabled
                    NOTIFY autostartChanged)
@@ -212,6 +227,9 @@ public:
 
     QVariantList auditEntries() const;
     QVariantMap adminApproval() const { return m_adminApproval; }
+
+    QVariantMap kdeConnect() const;
+    QVariantList kdeConnectDevices() const;
 
 public slots:
     void requestPairing(const QString &deviceId);
@@ -355,6 +373,26 @@ public slots:
      */
     bool sendClipboardToPhone();
 
+    /// Switch KDE Connect on or off for this user (Settings).
+    void setKdeConnectEnabled(bool enabled);
+
+    /// Re-read KDE Connect's state and devices.
+    void refreshKdeConnect();
+
+    // KDE Connect's devices. Each goes to kdeconnectd over D-Bus; KDE
+    // Connect's own pairing and plugin settings decide what is allowed.
+    void kdeConnectPair(const QString &deviceId);
+    void kdeConnectAcceptPairing(const QString &deviceId);
+    void kdeConnectRejectPairing(const QString &deviceId);
+    void kdeConnectUnpair(const QString &deviceId);
+    void kdeConnectPing(const QString &deviceId);
+    void kdeConnectRing(const QString &deviceId);
+    void kdeConnectSendFile(const QString &deviceId, const QString &fileUrl);
+    void kdeConnectSendClipboard(const QString &deviceId);
+
+    /// KDE Connect's own window, for its plugin and per-device settings.
+    void openKdeConnectSettings();
+
     /// Short, readable form of a fingerprint for display.
     QString shortFingerprint(const QString &fingerprint) const;
 
@@ -387,6 +425,7 @@ signals:
     void autostartChanged();
     void auditChanged();
     void adminApprovalChanged();
+    void kdeConnectChanged();
     void commandFinished(const QString &id, int exitCode, const QString &output);
     void securityAlert(const QString &summary, const QString &detail);
     void fileOffered(const QString &deviceId, int transferId, const QString &filename,
@@ -397,6 +436,10 @@ private:
 
 
     mazeconnect::core::DeviceManager m_manager;
+    mazeconnect::core::KdeConnectBridge m_kdeConnect;
+    /// Status line for a KDE Connect action: @p done when it was sent,
+    /// otherwise the reason it was not.
+    void reportKdeConnect(bool sent, const QString &done, const QString &error);
     DeviceListModel m_devices;
     TransferModel m_transfers;
     ActivityLog m_activity;

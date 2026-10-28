@@ -1427,7 +1427,7 @@ void DeviceManager::handleMessage(Connection *connection, const Message &message
         }
 
         m_guardRequester = link->deviceId;
-        // "on" on the wire is maze-guardd's vocabulary: the *device* is
+        // "on" on the wire is maze-switchd's vocabulary: the *device* is
         // enabled. Blocking is `on: false`.
         m_guard.setDeviceEnabled(device, message.boolean(QLatin1StringView("on")));
         break;

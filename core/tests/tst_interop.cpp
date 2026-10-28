@@ -393,7 +393,7 @@ void TestInterop::guardMessageShape() {
     QVERIFY2(!request.contains(QLatin1StringView("verb")), "a request could name a verb");
     QVERIFY2(!request.contains(QLatin1StringView("command")), "a request could carry a command");
 
-    // The device vocabulary, matched exactly against maze-guardd's own.
+    // The device vocabulary, matched exactly against maze-switchd's own.
     GuardDevice device{};
     QVERIFY(guardDeviceFromName(QStringLiteral("camera"), device));
     QVERIFY(guardDeviceFromName(QStringLiteral("microphone"), device));

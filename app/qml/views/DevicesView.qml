@@ -11,11 +11,23 @@ Item {
     id: root
 
     property string selectedDeviceId: ""
+    property string selectedKdeDeviceId: ""
+
+    readonly property bool kdeOn: Backend.kdeConnect.enabled === true
+    readonly property var kdeDevices: kdeOn ? Backend.kdeConnectDevices : []
+
+    onVisibleChanged: if (visible && kdeOn) Backend.refreshKdeConnect()
 
     FileDialog {
         id: fileDialog
         title: qsTr("Choose a file to send")
         onAccepted: Backend.sendFile(root.selectedDeviceId, selectedFile)
+    }
+
+    FileDialog {
+        id: kdeFileDialog
+        title: qsTr("Choose a file to send through KDE Connect")
+        onAccepted: Backend.kdeConnectSendFile(root.selectedKdeDeviceId, selectedFile)
     }
 
     // A header rather than a floating button: a list showing a stale device
@@ -56,10 +68,11 @@ Item {
         boundsBehavior: Flickable.StopAtBounds
 
         // Tells you what to do next rather than only that there is nothing.
+        // Not over KDE Connect's devices, which sit in the footer below.
         Column {
             anchors.centerIn: parent
             spacing: 14
-            visible: list.count === 0
+            visible: list.count === 0 && root.kdeDevices.length === 0
             width: 420
 
             Text {
@@ -258,6 +271,206 @@ Item {
              * way to revoke can be reintroduced without protocol changes. It
              * simply has no surface at the moment.
              */
+        }
+
+        // ---- KDE Connect ------------------------------------------------
+        // Its devices, while the switch in Settings is on. Kept apart from
+        // Maze Connect's own: different pairing, different guarantees, and
+        // every action goes to kdeconnectd, whose settings decide what is
+        // allowed.
+        footer: Item {
+            width: list.width
+            height: root.kdeOn ? kdeColumn.implicitHeight + 22 : 0
+            visible: root.kdeOn
+
+            Column {
+                id: kdeColumn
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.topMargin: 22
+                spacing: 10
+
+                Item {
+                    width: parent.width
+                    height: kdeSettingsButton.height
+
+                    SectionLabel {
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: qsTr("KDE Connect")
+                    }
+
+                    MazeButton {
+                        id: kdeSettingsButton
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: qsTr("KDE Connect settings")
+                        onClicked: Backend.openKdeConnectSettings()
+                    }
+                }
+
+                Text {
+                    width: parent.width
+                    visible: root.kdeDevices.length === 0
+                    wrapMode: Text.WordWrap
+                    text: Backend.kdeConnect.running
+                          ? qsTr("No KDE Connect devices yet. Open the KDE Connect app on the phone, on the same network, and pair from there or here.")
+                          : qsTr("KDE Connect is starting…")
+                    color: Theme.dim
+                    font.family: Theme.fontSans
+                    font.pixelSize: 12
+                    lineHeight: 1.45
+                }
+
+                Repeater {
+                    model: root.kdeDevices
+
+                    Rectangle {
+                        id: kdeCard
+
+                        required property var modelData
+                        readonly property bool paired: modelData.paired
+                        readonly property bool reachable: modelData.reachable
+                        readonly property bool asked: modelData.pairRequestedByPeer
+                        readonly property bool waiting: modelData.pairRequested
+
+                        width: kdeColumn.width
+                        height: 86
+                        radius: Theme.radiusPill + 2
+                        color: kdeHover.hovered ? Theme.pillHover : Theme.pill
+                        Behavior on color { ColorAnimation { duration: 130 } }
+
+                        HoverHandler { id: kdeHover }
+
+                        Row {
+                            id: kdeActions
+                            anchors.right: parent.right
+                            anchors.rightMargin: 14
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: 7
+
+                            MazeButton {
+                                text: qsTr("Pair")
+                                glyph: "⇄"
+                                primary: true
+                                visible: !kdeCard.paired && !kdeCard.asked && !kdeCard.waiting
+                                enabled: kdeCard.reachable
+                                onClicked: Backend.kdeConnectPair(kdeCard.modelData.deviceId)
+                            }
+                            MazeButton {
+                                text: qsTr("Accept")
+                                primary: true
+                                visible: kdeCard.asked
+                                onClicked: Backend.kdeConnectAcceptPairing(kdeCard.modelData.deviceId)
+                            }
+                            MazeButton {
+                                text: kdeCard.asked ? qsTr("Decline") : qsTr("Cancel")
+                                destructive: true
+                                visible: kdeCard.asked || kdeCard.waiting
+                                onClicked: Backend.kdeConnectRejectPairing(kdeCard.modelData.deviceId)
+                            }
+                            MazeButton {
+                                text: qsTr("Ping")
+                                visible: kdeCard.paired && kdeCard.modelData.canPing
+                                enabled: kdeCard.reachable
+                                onClicked: Backend.kdeConnectPing(kdeCard.modelData.deviceId)
+                            }
+                            MazeButton {
+                                text: qsTr("Ring")
+                                glyph: "♪"
+                                visible: kdeCard.paired && kdeCard.modelData.canRing
+                                enabled: kdeCard.reachable
+                                onClicked: Backend.kdeConnectRing(kdeCard.modelData.deviceId)
+                            }
+                            MazeButton {
+                                text: qsTr("Clipboard")
+                                visible: kdeCard.paired && kdeCard.modelData.canClipboard
+                                enabled: kdeCard.reachable
+                                onClicked: Backend.kdeConnectSendClipboard(kdeCard.modelData.deviceId)
+                            }
+                            MazeButton {
+                                text: qsTr("Send file")
+                                glyph: "↥"
+                                visible: kdeCard.paired && kdeCard.modelData.canShare
+                                enabled: kdeCard.reachable
+                                onClicked: {
+                                    root.selectedKdeDeviceId = kdeCard.modelData.deviceId
+                                    kdeFileDialog.open()
+                                }
+                            }
+                            MazeButton {
+                                text: qsTr("Forget")
+                                glyph: "✕"
+                                destructive: true
+                                visible: kdeCard.paired
+                                onClicked: Backend.kdeConnectUnpair(kdeCard.modelData.deviceId)
+                            }
+                        }
+
+                        Row {
+                            id: kdeNameRow
+                            anchors.left: parent.left
+                            anchors.leftMargin: 16
+                            anchors.right: kdeActions.left
+                            anchors.rightMargin: 16
+                            anchors.top: parent.top
+                            anchors.topMargin: 24
+                            spacing: 11
+
+                            Rectangle {
+                                width: 8
+                                height: 8
+                                radius: 4
+                                anchors.verticalCenter: parent.verticalCenter
+                                color: kdeCard.asked ? Theme.warn
+                                     : kdeCard.paired
+                                       ? (kdeCard.reachable ? Theme.ok : Theme.unknown)
+                                       : Theme.warn
+                            }
+
+                            Text {
+                                text: kdeCard.modelData.name
+                                color: Theme.text
+                                font.family: Theme.fontSans
+                                font.pixelSize: 14
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: Math.max(0, parent.width - 19)
+                                elide: Text.ElideRight
+                            }
+                        }
+
+                        Text {
+                            anchors.left: kdeNameRow.left
+                            anchors.leftMargin: 19
+                            anchors.right: kdeActions.left
+                            anchors.rightMargin: 16
+                            anchors.top: kdeNameRow.bottom
+                            anchors.topMargin: 5
+                            // While pairing, the key is the whole point: it is
+                            // what has to match on the other screen.
+                            text: {
+                                const d = kdeCard.modelData
+                                if (kdeCard.asked)
+                                    return qsTr("Wants to pair · check the key on the phone: %1").arg(d.verificationKey)
+                                if (kdeCard.waiting)
+                                    return qsTr("Waiting for the other device · key %1").arg(d.verificationKey)
+                                if (!kdeCard.paired)
+                                    return qsTr("Not paired · KDE Connect")
+                                let line = kdeCard.reachable ? qsTr("Connected") : qsTr("Paired · not reachable")
+                                if (d.battery >= 0)
+                                    line += "   ·   " + d.battery + " %" + (d.charging ? " ⚡" : "")
+                                return line + "   ·   " + qsTr("KDE Connect")
+                            }
+                            color: kdeCard.asked ? Theme.warn
+                                 : kdeCard.paired && kdeCard.reachable ? Theme.ok : Theme.dim
+                            font.family: Theme.fontMono
+                            font.pixelSize: 10
+                            elide: Text.ElideRight
+                        }
+                    }
+                }
+            }
         }
     }
 }

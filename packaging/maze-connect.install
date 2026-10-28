@@ -1,21 +1,29 @@
-# Package scriptlet: open the LAN ports Maze Connect needs.
+# Package scriptlet: open the LAN ports Maze Connect needs — its own, and
+# KDE Connect's (1714-1764) for the compatibility switch in Settings.
 #
 # Without this the application installs, runs, shows its own address, and
 # then quietly fails to link — firewalld drops the connection and neither
 # screen says why. That failure is indistinguishable from "the other device
 # is off", which is the worst kind of bug to hand a user.
 #
-# The rule is added to the *default zone only*, permanently, and is removed
+# The rules are added to the *default zone only*, permanently, and removed
 # again on uninstall. Nothing here touches any other zone or any other
-# service. To undo it by hand at any time:
+# service. To undo them by hand at any time:
 #
 #     firewall-cmd --permanent --remove-service=maze-connect && firewall-cmd --reload
+#     firewall-cmd --permanent --remove-service=kdeconnect && firewall-cmd --reload
+#
+# Why KDE Connect's ports here and not when the switch is turned on: the
+# application runs as the user, and anything it asks firewalld — even only
+# reading the configuration — is polkit's auth_admin, i.e. a password prompt
+# from a settings page. The scriptlet already runs as root. With the switch
+# off nothing listens on those ports, so an open port there answers nothing.
 
-_zone_note() {
+_zone_note() {  # _zone_note <service> <ports>
     local zone
     zone="$(firewall-cmd --get-default-zone 2>/dev/null || echo '?')"
-    printf '  Maze Connect: TCP+UDP 38271 allowed in the "%s" zone.\n' "$zone"
-    printf '  Undo with: firewall-cmd --permanent --remove-service=maze-connect && firewall-cmd --reload\n'
+    printf '  Maze Connect: %s (TCP+UDP %s) allowed in the "%s" zone.\n' "$1" "$2" "$zone"
+    printf '  Undo with: firewall-cmd --permanent --remove-service=%s && firewall-cmd --reload\n' "$1"
 }
 
 # firewall-cmd ALWAYS talks to the firewalld daemon over D-Bus — `--permanent`
@@ -28,26 +36,26 @@ _zone_note() {
 #
 # firewall-offline-cmd is the tool for that case: it edits the on-disk zone
 # directly, no daemon needed. Use whichever fits the situation.
-_add_rule() {
+_add_rule() {  # _add_rule <service>
     if firewall-cmd --state >/dev/null 2>&1; then
-        firewall-cmd --permanent --add-service=maze-connect >/dev/null 2>&1
+        firewall-cmd --permanent --add-service="$1" >/dev/null 2>&1
     elif command -v firewall-offline-cmd >/dev/null 2>&1; then
-        firewall-offline-cmd --add-service=maze-connect >/dev/null 2>&1
+        firewall-offline-cmd --add-service="$1" >/dev/null 2>&1
     else
         return 1
     fi
 }
 
-_open_ports() {
+_open_ports() {  # _open_ports <service> <ports>
     # No firewalld, nothing to arrange. Not an error: plenty of installs run
     # without one, and the application is unaffected.
     if ! command -v firewall-cmd >/dev/null 2>&1; then
         return
     fi
 
-    if ! _add_rule; then
-        printf '  Maze Connect: could not add the firewalld rule automatically.\n'
-        printf '  Run: firewall-cmd --permanent --add-service=maze-connect && firewall-cmd --reload\n'
+    if ! _add_rule "$1"; then
+        printf '  Maze Connect: could not add the firewalld rule for %s automatically.\n' "$1"
+        printf '  Run: firewall-cmd --permanent --add-service=%s && firewall-cmd --reload\n' "$1"
         return
     fi
 
@@ -57,24 +65,25 @@ _open_ports() {
     # above is already on disk and takes effect when firewalld next starts.)
     if firewall-cmd --state >/dev/null 2>&1; then
         firewall-cmd --reload >/dev/null 2>&1 || true
-        _zone_note
+        _zone_note "$1" "$2"
     fi
 }
 
-_close_ports() {
+_close_ports() {  # _close_ports <service>
     if ! command -v firewall-cmd >/dev/null 2>&1; then
         return
     fi
     if firewall-cmd --state >/dev/null 2>&1; then
-        firewall-cmd --permanent --remove-service=maze-connect >/dev/null 2>&1 || true
+        firewall-cmd --permanent --remove-service="$1" >/dev/null 2>&1 || true
         firewall-cmd --reload >/dev/null 2>&1 || true
     elif command -v firewall-offline-cmd >/dev/null 2>&1; then
-        firewall-offline-cmd --remove-service=maze-connect >/dev/null 2>&1 || true
+        firewall-offline-cmd --remove-service="$1" >/dev/null 2>&1 || true
     fi
 }
 
 post_install() {
-    _open_ports
+    _open_ports maze-connect 38271
+    _open_ports kdeconnect 1714-1764
     cat <<'EOF'
   Maze Connect is a per-user service. Enable it for your account with:
       systemctl --user enable --now mazeconnectd
@@ -90,7 +99,12 @@ EOF
 post_upgrade() {
     # Re-applied on upgrade because the service definition may have changed
     # (a port added, say) and firewalld holds a copy of the old one.
-    _open_ports
+    _open_ports maze-connect 38271
+    # KDE Connect's once, on the upgrade that brought the switch — not on
+    # every upgrade, which would undo an admin who closed it on purpose.
+    if [ "$(vercmp "$2" 1.6.0)" -lt 0 ]; then
+        _open_ports kdeconnect 1714-1764
+    fi
     # A running copy keeps the old code until it is restarted; the tray app
     # is usually running for days, so an upgrade otherwise looks like it did
     # nothing (1.2.0: the phone's Media screen waited forever).
@@ -112,5 +126,10 @@ pre_remove() {
 }
 
 post_remove() {
-    _close_ports
+    _close_ports maze-connect
+    # KDE Connect's only if KDE Connect went too: someone keeping it after
+    # removing Maze Connect still needs its ports.
+    if [ ! -x /usr/bin/kdeconnectd ]; then
+        _close_ports kdeconnect
+    fi
 }

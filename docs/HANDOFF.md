@@ -279,7 +279,7 @@ modelsiz Ollama'nın ayrı mesajlar vermesi, cihazlar arası geçmiş sızmamas�
 | | Nerede |
 | --- | --- |
 | Köprü | `core/src/plugins/GuardBridge.cpp` |
-| Soket | `/run/maze/guard.sock`, `$MAZECONNECT_GUARD_SOCKET` testler için |
+| Soket | `/run/maze/switch.sock` (maze-tools < 2.2.0: `guard.sock`), `$MAZECONNECT_GUARD_SOCKET` testler için |
 | Mesajlar | `guardStatus`/`guardReport`, `guardRequest`/`guardResult` |
 | Yetenek | `guardControl`, varsayılan kapalı |
 | Masaüstü | `app/qml/views/GuardView.qml` (banner dahil) |
@@ -313,7 +313,7 @@ kaldırır.
 > **Yol boyunca bulunan gerçek hata:** `GuardBridge` ilk yazımda tamamen
 > bloklayıcıydı (`waitForReadyRead`). Test bunu ortaya çıkardı — sunucu olay
 > döngüsüne muhtaç olduğu için bağlantı hiç kabul edilmiyordu — ama asıl
-> sonucu gerçek kullanımda masaüstünün 15 sn donmasıydı: maze-guardd
+> sonucu gerçek kullanımda masaüstünün 15 sn donmasıydı: maze-switchd
 > rfkill/systemctl çağırıyor ve kendine 60 sn bütçe veriyor. Asenkron kuyruk
 > hâline getirildi.
 
@@ -448,14 +448,14 @@ erişmek. Giden sadece pencere.
 Kullanıcı telefondan **Block**'a bastı, wifi **açıldı**. Activity günlüğü de
 "asked for on — now on" diyerek tutarlı görünüyordu.
 
-Sebep: `maze-guardd`'da `on`/`off` **cihazı** adlandırıyor, anahtarı değil.
+Sebep: `maze-switchd`'da `on`/`off` **cihazı** adlandırıyor, anahtarı değil.
 `KILL wifi off` → `rfkill block`. Ben `on`'u "koruma açık" diye okumuşum,
 bütün düğmeler ters çalışıyordu. İki okuma da tek başına doğru görünüyor —
 asıl hata iki sözlüğü aynı boolean'a yüklemekti.
 
 `setKill(device, on)` → **`setDeviceEnabled(device, enabled)`**;
 `requestedOn` → `requestedEnabled`. Parametre artık anahtarın değil cihazın
-adını taşıyor, `rfkill` ve `maze-guardd` ile aynı sözlük.
+adını taşıyor, `rfkill` ve `maze-switchd` ile aynı sözlük.
 `blockingSendsOffAndAllowingSendsOn` yönü tele karşı çiviliyor.
 
 Arayüzlerdeki çağrı `!blocked` idi — aynı ifade ters sözlükle okununca Block
@@ -531,7 +531,7 @@ geçerli: gerçek cihazda çalıştırmadan bitti sayma.
 
 ## 4. Tekrar tartışılmaması gereken kararlar
 
-### maze-guardd uzaktan erişimi kasten reddediyor
+### maze-switchd uzaktan erişimi kasten reddediyor
 Kendi başlığında yazıyor:
 > Callers are authorised by SO_PEERCRED: the peer must be a real user with an
 > ACTIVE local session (mirrors polkit allow_active) — **not root, not remote**.
