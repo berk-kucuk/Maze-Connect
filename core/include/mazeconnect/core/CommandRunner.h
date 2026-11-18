@@ -52,9 +52,16 @@ public:
 
     /**
      * `~/.config/mazeconnect/commands.json`, honouring $XDG_CONFIG_HOME.
-     * $MAZECONNECT_COMMANDS_FILE overrides it for tests.
      */
     static QString commandsFilePath();
+
+    /**
+     * Tests only: read the command list from @p path instead ("" restores the
+     * default). This used to be the $MAZECONNECT_COMMANDS_FILE environment
+     * variable, which the daemon honoured in every build (audit MCN4); a
+     * function only test code calls cannot be set from outside.
+     */
+    static void setCommandsFileForTesting(const QString &path);
 
     /**
      * Load and validate the file.

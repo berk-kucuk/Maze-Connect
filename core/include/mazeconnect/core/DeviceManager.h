@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QHash>
 #include <QObject>
@@ -575,6 +576,12 @@ private:
     /// A device allowed for the current session only ("Allow once").
     QString m_inputOnceGrant;
     bool fullInputAllowed(const Link &link) const;
+    /// Whether the screen is locked, asked of logind at most once a second
+    /// (remote input checks it on every event). Unknown counts as unlocked:
+    /// without logind there is no lock screen this could type into.
+    bool screenLocked();
+    qint64 m_lockCheckedMs = -1;
+    bool m_lockCached = false;
     void clearInputApproval();
     SharedFolder m_shared;
 

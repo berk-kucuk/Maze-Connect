@@ -10,7 +10,6 @@
 #include <QLoggingCategory>
 #include <QPointer>
 #include <QProcess>
-#include <QProcessEnvironment>
 #include <QSet>
 #include <QTimer>
 
@@ -18,6 +17,11 @@ namespace mazeconnect::core {
 namespace {
 
 Q_LOGGING_CATEGORY(lcCommands, "maze.connect.commands")
+
+QString &testCommandsFile() {
+    static QString path;
+    return path;
+}
 
 bool hasControlCharacters(const QString &s) {
     for (const QChar c : s) {
@@ -43,11 +47,13 @@ CommandRunner::~CommandRunner() {
     }
 }
 
+void CommandRunner::setCommandsFileForTesting(const QString &path) {
+    testCommandsFile() = path;
+}
+
 QString CommandRunner::commandsFilePath() {
-    const QString override = QProcessEnvironment::systemEnvironment().value(
-        QStringLiteral("MAZECONNECT_COMMANDS_FILE"));
-    if (!override.isEmpty()) {
-        return override;
+    if (!testCommandsFile().isEmpty()) {
+        return testCommandsFile();
     }
     QString base = QString::fromLocal8Bit(qgetenv("XDG_CONFIG_HOME"));
     if (base.isEmpty()) {

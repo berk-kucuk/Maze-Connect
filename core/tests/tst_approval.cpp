@@ -58,6 +58,7 @@ private slots:
     void relayRefusesStrangersAndNonsense();
     void relayCarriesTheSignatureAndTheVerdict();
     void relayAnswersAtOnceWithNoPhone();
+    void twoRequestsAtOnceAreBothRefused();
 
     void lockPhoneNeedsARequest();
     void onePhoneCannotAnswerForAnother();
@@ -846,6 +847,38 @@ void TestApproval::relayAnswersAtOnceWithNoPhone() {
     // Straight to the password, not after a timeout.
     QVERIFY(t.elapsed() < 2000);
     QCOMPARE(h->count(MessageType::ApprovalRequest), 0);
+}
+
+void TestApproval::twoRequestsAtOnceAreBothRefused() {
+    // MCN2: a background sudo racing the owner's own must not be able to put
+    // its prompt in front of them.
+    const auto key = newKey();
+    auto h = link(key->spki, true);
+    QVERIFY(h);
+    QTemporaryDir runtime;
+    QVERIFY(h->computer->startApprovalRelay(runtime.path()));
+    h->computer->approvalRelay()->setPeerCheckForTesting([](uid_t) { return true; });
+
+    RelayClient owner;
+    QVERIFY(owner.connectTo(h->computer->approvalRelay()->socketPath()));
+    owner.sendLine(relayRequest(approval::newNonce()));
+    QTRY_COMPARE_WITH_TIMEOUT(h->count(MessageType::ApprovalRequest), 1, 3000);
+
+    RelayClient intruder;
+    QVERIFY(intruder.connectTo(h->computer->approvalRelay()->socketPath()));
+    intruder.sendLine(relayRequest(approval::newNonce()));
+
+    QVERIFY(intruder.readLine().startsWith("ERR "));
+    QVERIFY(owner.readLine().startsWith("ERR "));
+    // The phone never saw the second one, and the first was withdrawn.
+    QCOMPARE(h->count(MessageType::ApprovalRequest), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(h->count(MessageType::ApprovalCancel), 1, 3000);
+
+    // One at a time still works afterwards.
+    RelayClient again;
+    QVERIFY(again.connectTo(h->computer->approvalRelay()->socketPath()));
+    again.sendLine(relayRequest(approval::newNonce()));
+    QTRY_COMPARE_WITH_TIMEOUT(h->count(MessageType::ApprovalRequest), 2, 3000);
 }
 
 void TestApproval::lockPhoneNeedsARequest() {

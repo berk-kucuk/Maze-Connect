@@ -54,6 +54,20 @@ cp "$here/packaging/PKGBUILD" "$here/packaging/$pkgname.install" "$work/"
 
 ( cd "$work" && makepkg -f --noconfirm )
 
+# ── aarch64: the same sources, built in an Arch Linux ARM root ───────────────
+#    (MazeLinux/tools/aarch64-build.sh). Skipped until that root is set up;
+#    MAZE_NO_AARCH64=1 skips it on purpose. A failure here keeps the x86_64
+#    package and is reported at the end.
+AARCH64_TOOL="$here/../../MazeLinux/tools/aarch64-build.sh"
+AARCH64_FAILED=0
+if [[ "${MAZE_NO_AARCH64:-0}" != 1 ]]; then
+  if [[ -x "$AARCH64_TOOL" ]] && "$AARCH64_TOOL" ready; then
+    "$AARCH64_TOOL" build "$work" "$here/dist" || AARCH64_FAILED=1
+  else
+    echo "aarch64 skipped — set the ARM root up once: MazeLinux/tools/aarch64-build.sh setup"
+  fi
+fi
+
 mkdir -p "$here/dist"
 cp "$work"/*.pkg.tar.zst "$here/dist/"
 
@@ -74,3 +88,8 @@ case "${1-}" in
         repo-add "$repo/$(basename "$repo").db.tar.gz" "$repo/$(basename "$built")"
         ;;
 esac
+
+if [[ "$AARCH64_FAILED" == 1 ]]; then
+  echo "the aarch64 build FAILED (x86_64 package above is fine) — see the log"
+  exit 1
+fi

@@ -2,7 +2,7 @@
 
 pkgname=maze-connect
 pkgver=1.6.0
-pkgrel=2
+pkgrel=3
 pkgdesc="Maze Linux device-link app — pair your phone over the LAN with verified, pinned mutual TLS"
 arch=('x86_64' 'aarch64')
 url="https://github.com/berk-kucuk/Maze-Connect"

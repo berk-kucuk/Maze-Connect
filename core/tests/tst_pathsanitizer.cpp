@@ -16,6 +16,7 @@ private slots:
     void rejectsTraversal_data();
     void rejectsTraversal();
     void rejectsControlCharacters();
+    void rejectsDirectionAndInvisibleMarks();
     void rejectsOverlongNames();
     void rejectsReservedDeviceNames();
     void confinementRejectsSymlinkEscape();
@@ -54,6 +55,16 @@ void TestPathSanitizer::rejectsTraversal() {
     QFETCH(QString, name);
     QVERIFY2(PathSanitizer::sanitizeFilename(name).isEmpty(),
              qPrintable(QStringLiteral("accepted hostile name: %1").arg(name)));
+}
+
+void TestPathSanitizer::rejectsDirectionAndInvisibleMarks() {
+    // MCN5: shown as "invoiceexe.pdf", saved as an .exe.
+    QVERIFY(PathSanitizer::sanitizeFilename(QString::fromUtf8("invoice\u202Efdp.exe")).isEmpty());
+    QVERIFY(PathSanitizer::sanitizeFilename(QString::fromUtf8("a\u2066b.txt")).isEmpty());
+    QVERIFY(PathSanitizer::sanitizeFilename(QString::fromUtf8("pass\u200Bwords.txt")).isEmpty());
+    QVERIFY(PathSanitizer::sanitizeFilename(QString::fromUtf8("no\uFEFFtes.txt")).isEmpty());
+    // Right-to-left text itself is fine; only the control marks are refused.
+    QVERIFY(!PathSanitizer::sanitizeFilename(QString::fromUtf8("\u05E9\u05DC\u05D5\u05DD.txt")).isEmpty());
 }
 
 void TestPathSanitizer::rejectsControlCharacters() {

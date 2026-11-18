@@ -65,11 +65,11 @@ private:
 void TestCommandRunner::init() {
     QVERIFY(m_dir.isValid());
     m_path = QDir(m_dir.path()).filePath(QStringLiteral("commands.json"));
-    qputenv("MAZECONNECT_COMMANDS_FILE", m_path.toUtf8());
+    CommandRunner::setCommandsFileForTesting(m_path);
 }
 
 void TestCommandRunner::cleanup() {
-    qunsetenv("MAZECONNECT_COMMANDS_FILE");
+    CommandRunner::setCommandsFileForTesting(QString());
     QFile::remove(m_path);
 }
 

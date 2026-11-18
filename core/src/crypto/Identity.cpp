@@ -123,13 +123,18 @@ Identity Identity::generate(const QString &deviceName) {
     // Subject == issuer (self-signed). The CN is cosmetic and trusted
     // nowhere; it is bounded only so a hostile local name cannot bloat the
     // certificate.
-    X509_NAME *name = X509_get_subject_name(cert.get());
+    // A name of our own, then set as both: OpenSSL 4 hands out the
+    // certificate's subject name as const, so it can no longer be edited in
+    // place (that is what stopped this file from compiling there).
+    std::unique_ptr<X509_NAME, decltype(&X509_NAME_free)> name(X509_NAME_new(), X509_NAME_free);
     const QByteArray cn = deviceName.left(64).toUtf8();
-    if (X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_UTF8,
-                                   reinterpret_cast<const unsigned char *>(cn.constData()),
-                                   cn.size(), -1, 0)
-            != 1
-        || X509_set_issuer_name(cert.get(), name) != 1) {
+    if (!name
+        || X509_NAME_add_entry_by_txt(name.get(), "CN", MBSTRING_UTF8,
+                                      reinterpret_cast<const unsigned char *>(cn.constData()),
+                                      cn.size(), -1, 0)
+               != 1
+        || X509_set_subject_name(cert.get(), name.get()) != 1
+        || X509_set_issuer_name(cert.get(), name.get()) != 1) {
         return {};
     }
 

@@ -13,6 +13,7 @@
 #include "mazeconnect/core/Identity.h"
 #include "mazeconnect/core/Limits.h"
 #include "mazeconnect/core/PhoneStatus.h"
+#include "mazeconnect/core/SessionControl.h"
 #include "mazeconnect/core/Version.h"
 
 using namespace mazeconnect::core;
@@ -41,6 +42,7 @@ private slots:
     void findPhoneResultsNeedARing();
 
     void fullControlIsOptIn();
+    void noInputWhileTheScreenIsLocked();
     void theComputerIsAskedAndOnceMeansOnce();
     void presenterRunsAndStopsOnRevoke();
     void sharedFolderOverTheLink();
@@ -359,6 +361,53 @@ void TestPhoneLink::findPhoneResultsNeedARing() {
     QVERIFY(h->computer->setCapabilityEnabled(QString::fromLatin1(kPhoneId),
                                               Capability::FindPhone, false));
     QVERIFY(!h->computer->ringPhone(QString::fromLatin1(kPhoneId), true));
+}
+
+namespace {
+class LockState : public SessionControl {
+public:
+    State current = State::Locked;
+    State state(QString *) override { return current; }
+    bool unlock(QString *) override { return false; }
+};
+} // namespace
+
+void TestPhoneLink::noInputWhileTheScreenIsLocked() {
+    // MCN5: keys sent to a locked computer land in the lock screen's
+    // password field — a paired phone in someone else's hands could guess.
+    auto h = link();
+    QVERIFY(h);
+    auto *backend = new FakeBackend;
+    h->computer->setInputBackendForTesting(backend);
+    auto *session = new LockState;
+    h->computer->setSessionControlForTesting(session);
+    QVERIFY(h->computer->setCapabilityEnabled(QString::fromLatin1(kPhoneId),
+                                              Capability::RemoteInput, true));
+
+    h->send(Message::inputSession(h->next(), true, QStringLiteral("full")));
+    QTRY_VERIFY_WITH_TIMEOUT(received(h->received, [](const Message &m) {
+        return m.type() == MessageType::InputState && !m.boolean(QLatin1StringView("active"))
+            && m.string(QLatin1StringView("error"), 300).contains(QStringLiteral("locked"));
+    }), 3000);
+    QVERIFY(!backend->active);
+
+    // Unlocked on the computer: it runs.
+    session->current = SessionControl::State::Unlocked;
+    QTest::qWait(1100);                                  // past the lock-state cache
+    h->received.clear();
+    h->send(Message::inputSession(h->next(), true, QStringLiteral("full")));
+    QTRY_VERIFY_WITH_TIMEOUT(received(h->received, [](const Message &m) {
+        return m.type() == MessageType::InputState && m.boolean(QLatin1StringView("active"));
+    }), 3000);
+    h->send(Message::inputEvent(h->next(), QJsonObject{{"kind", "key"}, {"key", "enter"}}));
+    QTRY_COMPARE_WITH_TIMEOUT(backend->keys, 2, 3000);
+
+    // The screen locks mid-session: the next key ends it, and is not typed.
+    session->current = SessionControl::State::Locked;
+    QTest::qWait(1100);
+    h->send(Message::inputEvent(h->next(), QJsonObject{{"kind", "key"}, {"key", "enter"}}));
+    QTest::qWait(300);
+    QCOMPARE(backend->keys, 2);
 }
 
 void TestPhoneLink::fullControlIsOptIn() {

@@ -1556,6 +1556,15 @@ void DeviceManager::handleMessage(Connection *connection, const Message &message
         if (!full && modeName != QLatin1StringView("presenter")) {
             break;
         }
+        // Never while the screen is locked (audit MCN5): the keys would land
+        // in the lock screen's password field, so a paired phone in someone
+        // else's hands could try passwords on the computer. Unlocking from
+        // the phone is its own, signed approval (ApprovalPurpose::Unlock).
+        if (screenLocked()) {
+            connection->send(Message::inputState(connection->nextCounter(), false, modeName,
+                                                 tr("the computer is locked — unlock it first")));
+            break;
+        }
         // Full control is opt-in per device (optInCapabilities); the
         // presenter's fixed keys ride on either capability.
         const bool allowed = full
@@ -1603,7 +1612,12 @@ void DeviceManager::handleMessage(Connection *connection, const Message &message
         if (m_input->owner() != link->deviceId) {
             break;
         }
-        // Re-checked per event, so a revocation mid-session stops it cold.
+        // Re-checked per event, so a revocation mid-session stops it cold —
+        // and so does the screen locking while a session runs.
+        if (screenLocked()) {
+            m_input->end(link->deviceId, tr("the computer locked"));
+            break;
+        }
         const bool full = m_input->mode() == RemoteInput::Mode::Full;
         if (full ? !fullInputAllowed(*link)
                  : !(capabilityAllowed(*link, Capability::Presenter)
@@ -2405,6 +2419,19 @@ int DeviceManager::sendClipboard(const QString &text) {
     return sent;
 }
 
+bool DeviceManager::screenLocked() {
+    static QElapsedTimer clock;
+    if (!clock.isValid()) {
+        clock.start();
+    }
+    const qint64 now = clock.elapsed();
+    if (m_lockCheckedMs < 0 || now - m_lockCheckedMs >= 1000) {
+        m_lockCached = m_session && m_session->state(nullptr) == SessionControl::State::Locked;
+        m_lockCheckedMs = now;
+    }
+    return m_lockCached;
+}
+
 bool DeviceManager::fullInputAllowed(const Link &link) const {
     if (capabilityAllowed(link, Capability::RemoteInput)) {
         return true;
@@ -2668,6 +2695,7 @@ QByteArray DeviceManager::approvalKey(const QString &deviceId) const {
 
 void DeviceManager::setSessionControlForTesting(SessionControl *session) {
     m_session.reset(session);
+    m_lockCheckedMs = -1;
 }
 
 QString DeviceManager::approvalLabel(approval::Purpose purpose) const {
@@ -2955,6 +2983,31 @@ void DeviceManager::onRelayRequested(const ApprovalRelay::Request &request) {
     }
     if (devices.isEmpty()) {
         m_relay.fail(request.id, tr("no phone that can approve is connected"));
+        return;
+    }
+    // Two administrator requests at once: refuse both. The code on the
+    // terminal is two digits; a program that starts its own sudo in the
+    // background while the owner is answering theirs only needs the phone to
+    // show ITS prompt when the owner types THEIR code — one time in ninety the
+    // codes match, and it can keep trying. The owner gets told instead. One
+    // still waiting for a phone counts; one already signed and being checked
+    // by PAM is past the point where it could be swapped, and stays.
+    // (A request whose sudo was interrupted is gone already: onRelayAbandoned.)
+    QList<quint32> open;
+    for (auto it = m_approvals.cbegin(); it != m_approvals.cend(); ++it) {
+        if (it->relayId != 0 && it->answeredBy.isEmpty()) {
+            open.append(it.key());
+        }
+    }
+    if (!open.isEmpty()) {
+        const QString reason =
+            tr("two administrator requests arrived at once, so both were refused — if you "
+               "ran only one command, something else on this computer asked too");
+        qCWarning(lcLink) << "refusing" << open.size() + 1 << "concurrent approval requests";
+        for (const quint32 id : open) {
+            closeApproval(id, reason);
+        }
+        m_relay.fail(request.id, reason);
         return;
     }
     openApproval(request.challenge, devices, request.id,

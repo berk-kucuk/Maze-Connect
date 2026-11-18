@@ -32,6 +32,13 @@ bool hasControlCharacters(const QString &s) {
         if (u < 0x20 || u == 0x7F || (u >= 0x80 && u <= 0x9F)) {
             return true;
         }
+        // Direction overrides and isolates, and the invisible marks (audit
+        // MCN5): "invoice\u202Efdp.exe" is shown as "invoiceexe.pdf". Every
+        // other place that shows text from a phone refuses these already.
+        if ((u >= 0x202A && u <= 0x202E) || (u >= 0x2066 && u <= 0x2069)
+            || u == 0x200E || u == 0x200F || (u >= 0x200B && u <= 0x200D) || u == 0xFEFF) {
+            return true;
+        }
     }
     return false;
 }
